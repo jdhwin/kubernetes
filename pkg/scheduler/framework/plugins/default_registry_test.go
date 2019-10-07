@@ -25,18 +25,6 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
 )
 
-func appendToPluginSet(pluginSet *config.PluginSet, name string, weight *int32) *config.PluginSet {
-	if pluginSet == nil {
-		pluginSet = &config.PluginSet{}
-	}
-	config := config.Plugin{Name: name}
-	if weight != nil {
-		config.Weight = *weight
-	}
-	pluginSet.Enabled = append(pluginSet.Enabled, config)
-	return pluginSet
-}
-
 func produceConfig(keys []string, producersMap map[string]ConfigProducer, args ConfigProducerArgs) (*config.Plugins, []config.PluginConfig, error) {
 	var plugins config.Plugins
 	var pluginConfig []config.PluginConfig
@@ -53,7 +41,7 @@ func produceConfig(keys []string, producersMap map[string]ConfigProducer, args C
 }
 
 func TestRegisterConfigProducers(t *testing.T) {
-	registry := NewConfigProducerRegistry()
+	registry := NewDefaultConfigProducerRegistry()
 	testPredicateName1 := "testPredicate1"
 	testFilterName1 := "testFilter1"
 	registry.RegisterPredicate(testPredicateName1,

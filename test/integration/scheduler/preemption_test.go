@@ -38,12 +38,15 @@ import (
 	restclient "k8s.io/client-go/rest"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/apis/scheduling"
-	_ "k8s.io/kubernetes/pkg/scheduler/algorithmprovider"
+	"k8s.io/kubernetes/pkg/scheduler"
 	schedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
+	frameworkplugins "k8s.io/kubernetes/pkg/scheduler/framework/plugins"
 	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
 	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
 	"k8s.io/kubernetes/plugin/pkg/admission/priority"
 	testutils "k8s.io/kubernetes/test/utils"
+
+	_ "k8s.io/kubernetes/pkg/scheduler/algorithmprovider"
 
 	"k8s.io/klog"
 )
@@ -82,7 +85,7 @@ func (fp *tokenFilter) Name() string {
 	return tokenFilterName
 }
 
-func (fp *tokenFilter) Filter(pc *framework.PluginContext, pod *v1.Pod,
+func (fp *tokenFilter) Filter(state *framework.CycleState, pod *v1.Pod,
 	nodeInfo *schedulernodeinfo.NodeInfo) *framework.Status {
 	if fp.Tokens > 0 {
 		fp.Tokens--
@@ -95,23 +98,23 @@ func (fp *tokenFilter) Filter(pc *framework.PluginContext, pod *v1.Pod,
 	return framework.NewStatus(status, fmt.Sprintf("can't fit %v", pod.Name))
 }
 
-func (fp *tokenFilter) PreFilter(pc *framework.PluginContext, pod *v1.Pod) *framework.Status {
+func (fp *tokenFilter) PreFilter(state *framework.CycleState, pod *v1.Pod) *framework.Status {
 	return nil
 }
 
-func (fp *tokenFilter) AddPod(pc *framework.PluginContext, podToSchedule *v1.Pod,
+func (fp *tokenFilter) AddPod(state *framework.CycleState, podToSchedule *v1.Pod,
 	podToAdd *v1.Pod, nodeInfo *schedulernodeinfo.NodeInfo) *framework.Status {
 	fp.Tokens--
 	return nil
 }
 
-func (fp *tokenFilter) RemovePod(pc *framework.PluginContext, podToSchedule *v1.Pod,
+func (fp *tokenFilter) RemovePod(state *framework.CycleState, podToSchedule *v1.Pod,
 	podToRemove *v1.Pod, nodeInfo *schedulernodeinfo.NodeInfo) *framework.Status {
 	fp.Tokens++
 	return nil
 }
 
-func (fp *tokenFilter) Updater() framework.Updater {
+func (fp *tokenFilter) PreFilterExtensions() framework.PreFilterExtensions {
 	return fp
 }
 
@@ -121,10 +124,12 @@ var _ = framework.FilterPlugin(&tokenFilter{})
 func TestPreemption(t *testing.T) {
 	// Initialize scheduler with a filter plugin.
 	var filter tokenFilter
-	registry := framework.Registry{filterPluginName: func(_ *runtime.Unknown, fh framework.FrameworkHandle) (framework.Plugin, error) {
+	registry := frameworkplugins.NewDefaultRegistry()
+
+	registry.Register(filterPluginName, func(_ *runtime.Unknown, fh framework.FrameworkHandle) (framework.Plugin, error) {
 		return &filter, nil
-	}}
-	plugin := &schedulerconfig.Plugins{
+	})
+	plugins := &schedulerconfig.Plugins{
 		Filter: &schedulerconfig.PluginSet{
 			Enabled: []schedulerconfig.Plugin{
 				{
@@ -142,7 +147,9 @@ func TestPreemption(t *testing.T) {
 	}
 	context := initTestSchedulerWithOptions(t,
 		initTestMaster(t, "preemptiom", nil),
-		false, nil, registry, plugin, []schedulerconfig.PluginConfig{}, time.Second)
+		false, nil, time.Second,
+		scheduler.WithFrameworkPlugins(plugins),
+		scheduler.WithFrameworkRegistry(registry))
 
 	defer cleanupTest(t, context)
 	cs := context.clientSet
