@@ -39,6 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	e2esset "k8s.io/kubernetes/test/e2e/framework/statefulset"
@@ -150,15 +151,8 @@ var _ = utils.SIGDescribe("PersistentVolumes-local ", func() {
 	)
 
 	ginkgo.BeforeEach(func() {
-		// Get all the schedulable nodes
-		nodes := framework.GetReadySchedulableNodesOrDie(f.ClientSet)
-		gomega.Expect(len(nodes.Items)).NotTo(gomega.BeZero(), "No available nodes for scheduling")
-
-		// Cap max number of nodes
-		maxLen := len(nodes.Items)
-		if maxLen > maxNodes {
-			maxLen = maxNodes
-		}
+		nodes, err := e2enode.GetBoundedReadySchedulableNodes(f.ClientSet, maxNodes)
+		framework.ExpectNoError(err)
 
 		scName = fmt.Sprintf("%v-%v", testSCPrefix, f.Namespace.Name)
 		// Choose the first node
@@ -169,7 +163,7 @@ var _ = utils.SIGDescribe("PersistentVolumes-local ", func() {
 		config = &localTestConfig{
 			ns:           f.Namespace.Name,
 			client:       f.ClientSet,
-			nodes:        nodes.Items[:maxLen],
+			nodes:        nodes.Items,
 			node0:        node0,
 			scName:       scName,
 			discoveryDir: filepath.Join(hostBase, f.Namespace.Name),
@@ -1188,9 +1182,10 @@ func validateStatefulSet(config *localTestConfig, ss *appsv1.StatefulSet, anti b
 // and skips if a disk of that type does not exist on the node
 func SkipUnlessLocalSSDExists(config *localTestConfig, ssdInterface, filesystemType string, node *v1.Node) {
 	ssdCmd := fmt.Sprintf("ls -1 /mnt/disks/by-uuid/google-local-ssds-%s-%s/ | wc -l", ssdInterface, filesystemType)
-	res, err := config.hostExec.IssueCommandWithResult(ssdCmd, node)
+	res, err := config.hostExec.Execute(ssdCmd, node)
+	utils.LogResult(res)
 	framework.ExpectNoError(err)
-	num, err := strconv.Atoi(strings.TrimSpace(res))
+	num, err := strconv.Atoi(strings.TrimSpace(res.Stdout))
 	framework.ExpectNoError(err)
 	if num < 1 {
 		framework.Skipf("Requires at least 1 %s %s localSSD ", ssdInterface, filesystemType)

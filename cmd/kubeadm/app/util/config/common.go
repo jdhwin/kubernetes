@@ -63,7 +63,9 @@ func validateSupportedVersion(gv schema.GroupVersion, allowDeprecated bool) erro
 	}
 
 	// Deprecated API versions are supported by us, but can only be used for migration.
-	deprecatedAPIVersions := map[string]struct{}{}
+	deprecatedAPIVersions := map[string]struct{}{
+		"kubeadm.k8s.io/v1beta1": {},
+	}
 
 	gvString := gv.String()
 
@@ -72,7 +74,7 @@ func validateSupportedVersion(gv schema.GroupVersion, allowDeprecated bool) erro
 	}
 
 	if _, present := deprecatedAPIVersions[gvString]; present && !allowDeprecated {
-		return errors.Errorf("your configuration file uses a deprecated API spec: %q. Please use 'kubeadm config migrate --old-config old.yaml --new-config new.yaml', which will write the new, similar spec using a newer API version.", gv.String())
+		klog.Warningf("your configuration file uses a deprecated API spec: %q. Please use 'kubeadm config migrate --old-config old.yaml --new-config new.yaml', which will write the new, similar spec using a newer API version.", gv)
 	}
 
 	return nil
@@ -137,10 +139,10 @@ func VerifyAPIServerBindAddress(address string) error {
 	return nil
 }
 
-// ChooseAPIServerBindAddress is a wrapper for netutil.ChooseBindAddress that also handles
-// the case where no default routes were found and an IP for the API server could not be obatained.
+// ChooseAPIServerBindAddress is a wrapper for netutil.ResolveBindAddress that also handles
+// the case where no default routes were found and an IP for the API server could not be obtained.
 func ChooseAPIServerBindAddress(bindAddress net.IP) (net.IP, error) {
-	ip, err := netutil.ChooseBindAddress(bindAddress)
+	ip, err := netutil.ResolveBindAddress(bindAddress)
 	if err != nil {
 		if netutil.IsNoRoutesError(err) {
 			klog.Warningf("WARNING: could not obtain a bind address for the API Server: %v; using: %s", err, constants.DefaultAPIServerBindAddress)

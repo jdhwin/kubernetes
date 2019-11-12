@@ -17,13 +17,14 @@ limitations under the License.
 package scheduler
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	policy "k8s.io/api/policy/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -49,13 +50,12 @@ import (
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/controller/disruption"
 	"k8s.io/kubernetes/pkg/scheduler"
-	latestschedulerapi "k8s.io/kubernetes/pkg/scheduler/api/latest"
-	schedulerconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
+	schedulerapi "k8s.io/kubernetes/pkg/scheduler/apis/config"
+	"k8s.io/kubernetes/pkg/scheduler/apis/config/scheme"
+	schedulerapiv1 "k8s.io/kubernetes/pkg/scheduler/apis/config/v1"
 
 	// Register defaults in pkg/scheduler/algorithmprovider.
 	_ "k8s.io/kubernetes/pkg/scheduler/algorithmprovider"
-	schedulerapi "k8s.io/kubernetes/pkg/scheduler/api"
-	"k8s.io/kubernetes/pkg/scheduler/factory"
 	taintutils "k8s.io/kubernetes/pkg/util/taints"
 	"k8s.io/kubernetes/test/integration/framework"
 	imageutils "k8s.io/kubernetes/test/utils/image"
@@ -68,22 +68,29 @@ type testContext struct {
 	clientSet       *clientset.Clientset
 	informerFactory informers.SharedInformerFactory
 	scheduler       *scheduler.Scheduler
-	stopCh          chan struct{}
+	ctx             context.Context
+	cancelFn        context.CancelFunc
 }
 
-func createAlgorithmSourceFromPolicy(policy *schedulerapi.Policy, clientSet clientset.Interface) schedulerconfig.SchedulerAlgorithmSource {
-	policyString := runtime.EncodeOrDie(latestschedulerapi.Codec, policy)
+func createAlgorithmSourceFromPolicy(policy *schedulerapi.Policy, clientSet clientset.Interface) schedulerapi.SchedulerAlgorithmSource {
+	// Serialize the Policy object into a ConfigMap later.
+	info, ok := runtime.SerializerInfoForMediaType(scheme.Codecs.SupportedMediaTypes(), runtime.ContentTypeJSON)
+	if !ok {
+		panic("could not find json serializer")
+	}
+	encoder := scheme.Codecs.EncoderForVersion(info.Serializer, schedulerapiv1.SchemeGroupVersion)
+	policyString := runtime.EncodeOrDie(encoder, policy)
 	configPolicyName := "scheduler-custom-policy-config"
 	policyConfigMap := v1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Namespace: metav1.NamespaceSystem, Name: configPolicyName},
-		Data:       map[string]string{schedulerconfig.SchedulerPolicyConfigMapKey: policyString},
+		Data:       map[string]string{schedulerapi.SchedulerPolicyConfigMapKey: policyString},
 	}
 	policyConfigMap.APIVersion = "v1"
 	clientSet.CoreV1().ConfigMaps(metav1.NamespaceSystem).Create(&policyConfigMap)
 
-	return schedulerconfig.SchedulerAlgorithmSource{
-		Policy: &schedulerconfig.SchedulerPolicySource{
-			ConfigMap: &schedulerconfig.SchedulerPolicyConfigMapSource{
+	return schedulerapi.SchedulerAlgorithmSource{
+		Policy: &schedulerapi.SchedulerPolicySource{
+			ConfigMap: &schedulerapi.SchedulerPolicyConfigMapSource{
 				Namespace: policyConfigMap.Namespace,
 				Name:      policyConfigMap.Name,
 			},
@@ -94,8 +101,10 @@ func createAlgorithmSourceFromPolicy(policy *schedulerapi.Policy, clientSet clie
 // initTestMasterAndScheduler initializes a test environment and creates a master with default
 // configuration.
 func initTestMaster(t *testing.T, nsPrefix string, admission admission.Interface) *testContext {
+	ctx, cancelFunc := context.WithCancel(context.Background())
 	context := testContext{
-		stopCh: make(chan struct{}),
+		ctx:      ctx,
+		cancelFn: cancelFunc,
 	}
 
 	// 1. Create master
@@ -160,7 +169,7 @@ func initTestSchedulerWithOptions(
 
 	// create independent pod informer if required
 	if setPodInformer {
-		podInformer = factory.NewPodInformer(context.clientSet, 12*time.Hour)
+		podInformer = scheduler.NewPodInformer(context.clientSet, 12*time.Hour)
 	} else {
 		podInformer = context.informerFactory.Core().V1().Pods()
 	}
@@ -172,32 +181,23 @@ func initTestSchedulerWithOptions(
 		legacyscheme.Scheme,
 		v1.DefaultSchedulerName,
 	)
-	var algorithmSrc schedulerconfig.SchedulerAlgorithmSource
+	var algorithmSrc schedulerapi.SchedulerAlgorithmSource
 	if policy != nil {
 		algorithmSrc = createAlgorithmSourceFromPolicy(policy, context.clientSet)
 	} else {
-		provider := schedulerconfig.SchedulerDefaultProviderName
-		algorithmSrc = schedulerconfig.SchedulerAlgorithmSource{
+		provider := schedulerapi.SchedulerDefaultProviderName
+		algorithmSrc = schedulerapi.SchedulerAlgorithmSource{
 			Provider: &provider,
 		}
 	}
 	opts = append([]scheduler.Option{scheduler.WithBindTimeoutSeconds(600)}, opts...)
 	context.scheduler, err = scheduler.New(
 		context.clientSet,
-		context.informerFactory.Core().V1().Nodes(),
+		context.informerFactory,
 		podInformer,
-		context.informerFactory.Core().V1().PersistentVolumes(),
-		context.informerFactory.Core().V1().PersistentVolumeClaims(),
-		context.informerFactory.Core().V1().ReplicationControllers(),
-		context.informerFactory.Apps().V1().ReplicaSets(),
-		context.informerFactory.Apps().V1().StatefulSets(),
-		context.informerFactory.Core().V1().Services(),
-		context.informerFactory.Policy().V1beta1().PodDisruptionBudgets(),
-		context.informerFactory.Storage().V1().StorageClasses(),
-		context.informerFactory.Storage().V1beta1().CSINodes(),
 		recorder,
 		algorithmSrc,
-		context.stopCh,
+		context.ctx.Done(),
 		opts...,
 	)
 
@@ -217,7 +217,8 @@ func initTestSchedulerWithOptions(
 	context.informerFactory.Start(context.scheduler.StopEverything)
 	context.informerFactory.WaitForCacheSync(context.scheduler.StopEverything)
 
-	context.scheduler.Run()
+	go context.scheduler.Run(context.ctx)
+
 	return context
 }
 
@@ -271,7 +272,7 @@ func initTestDisablePreemption(t *testing.T, nsPrefix string) *testContext {
 // at the end of a test.
 func cleanupTest(t *testing.T, context *testContext) {
 	// Kill the scheduler.
-	close(context.stopCh)
+	context.cancelFn()
 	// Cleanup nodes.
 	context.clientSet.CoreV1().Nodes().DeleteCollection(nil, metav1.ListOptions{})
 	framework.DeleteTestingNamespace(context.ns, context.httpServer, t)
@@ -391,7 +392,8 @@ func nodeTainted(cs clientset.Interface, nodeName string, taints []v1.Taint) wai
 			return false, err
 		}
 
-		if len(taints) != len(node.Spec.Taints) {
+		// node.Spec.Taints may have more taints
+		if len(taints) > len(node.Spec.Taints) {
 			return false, nil
 		}
 

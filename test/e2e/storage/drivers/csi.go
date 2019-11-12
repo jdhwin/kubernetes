@@ -37,7 +37,6 @@ package drivers
 
 import (
 	"fmt"
-	"math/rand"
 	"strconv"
 	"time"
 
@@ -52,6 +51,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
+	"k8s.io/kubernetes/test/e2e/framework/volume"
 	"k8s.io/kubernetes/test/e2e/storage/testpatterns"
 	"k8s.io/kubernetes/test/e2e/storage/testsuites"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
@@ -80,6 +81,9 @@ func initHostPathCSIDriver(name string, capabilities map[testsuites.Capability]b
 			SupportedFsType: sets.NewString(
 				"", // Default fsType
 			),
+			SupportedSizeRange: volume.SizeRange{
+				Min: "1Mi",
+			},
 			Capabilities: capabilities,
 		},
 		manifests:        manifests,
@@ -159,23 +163,19 @@ func (h *hostpathCSIDriver) GetSnapshotClass(config *testsuites.PerTestConfig) *
 	return testsuites.GetSnapshotClass(snapshotter, parameters, ns, suffix)
 }
 
-func (h *hostpathCSIDriver) GetClaimSize() string {
-	return "5Gi"
-}
-
 func (h *hostpathCSIDriver) PrepareTest(f *framework.Framework) (*testsuites.PerTestConfig, func()) {
 	ginkgo.By(fmt.Sprintf("deploying %s driver", h.driverInfo.Name))
 	cancelLogging := testsuites.StartPodLogs(f)
 	cs := f.ClientSet
 
 	// The hostpath CSI driver only works when everything runs on the same node.
-	nodes := framework.GetReadySchedulableNodesOrDie(cs)
-	nodeName := nodes.Items[rand.Intn(len(nodes.Items))].Name
+	node, err := e2enode.GetRandomReadySchedulableNode(cs)
+	framework.ExpectNoError(err)
 	config := &testsuites.PerTestConfig{
 		Driver:         h,
 		Prefix:         "hostpath",
 		Framework:      f,
-		ClientNodeName: nodeName,
+		ClientNodeName: node.Name,
 	}
 
 	o := utils.PatchCSIOptions{
@@ -185,9 +185,9 @@ func (h *hostpathCSIDriver) PrepareTest(f *framework.Framework) (*testsuites.Per
 		DriverContainerArguments: []string{"--drivername=" + config.GetUniqueDriverName()},
 		ProvisionerContainerName: "csi-provisioner",
 		SnapshotterContainerName: "csi-snapshotter",
-		NodeName:                 nodeName,
+		NodeName:                 node.Name,
 	}
-	cleanup, err := config.Framework.CreateFromManifests(func(item interface{}) error {
+	cleanup, err := utils.CreateFromManifests(config.Framework, func(item interface{}) error {
 		return utils.PatchCSIDeployment(config.Framework, o, item)
 	},
 		h.manifests...)
@@ -287,18 +287,14 @@ func (m *mockCSIDriver) GetDynamicProvisionStorageClass(config *testsuites.PerTe
 	return testsuites.GetStorageClass(provisioner, parameters, nil, ns, suffix)
 }
 
-func (m *mockCSIDriver) GetClaimSize() string {
-	return "5Gi"
-}
-
 func (m *mockCSIDriver) PrepareTest(f *framework.Framework) (*testsuites.PerTestConfig, func()) {
 	ginkgo.By("deploying csi mock driver")
 	cancelLogging := testsuites.StartPodLogs(f)
 	cs := f.ClientSet
 
 	// pods should be scheduled on the node
-	nodes := framework.GetReadySchedulableNodesOrDie(cs)
-	node := nodes.Items[rand.Intn(len(nodes.Items))]
+	node, err := e2enode.GetRandomReadySchedulableNode(cs)
+	framework.ExpectNoError(err)
 	config := &testsuites.PerTestConfig{
 		Driver:         m,
 		Prefix:         "mock",
@@ -333,7 +329,7 @@ func (m *mockCSIDriver) PrepareTest(f *framework.Framework) (*testsuites.PerTest
 			storagev1beta1.VolumeLifecycleEphemeral,
 		},
 	}
-	cleanup, err := f.CreateFromManifests(func(item interface{}) error {
+	cleanup, err := utils.CreateFromManifests(f, func(item interface{}) error {
 		return utils.PatchCSIDeployment(f, o, item)
 	},
 		m.manifests...)
@@ -380,6 +376,9 @@ func InitGcePDCSIDriver() testsuites.TestDriver {
 			Name:        GCEPDCSIDriverName,
 			FeatureTag:  "[Serial]",
 			MaxFileSize: testpatterns.FileSizeMedium,
+			SupportedSizeRange: volume.SizeRange{
+				Min: "5Gi",
+			},
 			SupportedFsType: sets.NewString(
 				"", // Default fsType
 				"ext2",
@@ -390,13 +389,16 @@ func InitGcePDCSIDriver() testsuites.TestDriver {
 			SupportedMountOption: sets.NewString("debug", "nouid32"),
 			Capabilities: map[testsuites.Capability]bool{
 				testsuites.CapPersistence: true,
+				testsuites.CapBlock:       true,
 				testsuites.CapFsGroup:     true,
 				testsuites.CapExec:        true,
 				testsuites.CapMultiPODs:   true,
 				// GCE supports volume limits, but the test creates large
 				// number of volumes and times out test suites.
-				testsuites.CapVolumeLimits: false,
-				testsuites.CapTopology:     true,
+				testsuites.CapVolumeLimits:        false,
+				testsuites.CapTopology:            true,
+				testsuites.CapControllerExpansion: true,
+				testsuites.CapNodeExpansion:       true,
 			},
 			RequiredAccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
 			TopologyKeys:        []string{GCEPDCSIZoneTopologyKey},
@@ -432,10 +434,6 @@ func (g *gcePDCSIDriver) GetDynamicProvisionStorageClass(config *testsuites.PerT
 	return testsuites.GetStorageClass(provisioner, parameters, &delayedBinding, ns, suffix)
 }
 
-func (g *gcePDCSIDriver) GetClaimSize() string {
-	return "5Gi"
-}
-
 func (g *gcePDCSIDriver) PrepareTest(f *framework.Framework) (*testsuites.PerTestConfig, func()) {
 	ginkgo.By("deploying csi gce-pd driver")
 	cancelLogging := testsuites.StartPodLogs(f)
@@ -461,7 +459,7 @@ func (g *gcePDCSIDriver) PrepareTest(f *framework.Framework) (*testsuites.PerTes
 		"test/e2e/testing-manifests/storage-csi/gce-pd/controller_ss.yaml",
 	}
 
-	cleanup, err := f.CreateFromManifests(nil, manifests...)
+	cleanup, err := utils.CreateFromManifests(f, nil, manifests...)
 	if err != nil {
 		framework.Failf("deploying csi gce-pd driver: %v", err)
 	}
@@ -482,7 +480,10 @@ func (g *gcePDCSIDriver) PrepareTest(f *framework.Framework) (*testsuites.PerTes
 }
 
 func waitForCSIDriverRegistrationOnAllNodes(driverName string, cs clientset.Interface) error {
-	nodes := framework.GetReadySchedulableNodesOrDie(cs)
+	nodes, err := e2enode.GetReadySchedulableNodes(cs)
+	if err != nil {
+		return err
+	}
 	for _, node := range nodes.Items {
 		if err := waitForCSIDriverRegistrationOnNode(node.Name, driverName, cs); err != nil {
 			return err
@@ -495,7 +496,7 @@ func waitForCSIDriverRegistrationOnNode(nodeName string, driverName string, cs c
 	const csiNodeRegisterTimeout = 1 * time.Minute
 
 	return wait.PollImmediate(10*time.Second, csiNodeRegisterTimeout, func() (bool, error) {
-		csiNode, err := cs.StorageV1beta1().CSINodes().Get(nodeName, metav1.GetOptions{})
+		csiNode, err := cs.StorageV1().CSINodes().Get(nodeName, metav1.GetOptions{})
 		if err != nil && !errors.IsNotFound(err) {
 			return false, err
 		}

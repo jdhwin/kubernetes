@@ -36,10 +36,11 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/component-base/metrics/prometheus/ratelimiter"
 	"k8s.io/klog"
 	"k8s.io/kubernetes/pkg/controller"
+	endpointslicemetrics "k8s.io/kubernetes/pkg/controller/endpointslice/metrics"
 	endpointutil "k8s.io/kubernetes/pkg/controller/util/endpoint"
-	"k8s.io/kubernetes/pkg/util/metrics"
 )
 
 const (
@@ -69,8 +70,10 @@ func NewController(podInformer coreinformers.PodInformer,
 	recorder := broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "endpoint-slice-controller"})
 
 	if client != nil && client.CoreV1().RESTClient().GetRateLimiter() != nil {
-		metrics.RegisterMetricAndTrackRateLimiterUsage("endpoint_slice_controller", client.DiscoveryV1alpha1().RESTClient().GetRateLimiter())
+		ratelimiter.RegisterMetricAndTrackRateLimiterUsage("endpoint_slice_controller", client.DiscoveryV1alpha1().RESTClient().GetRateLimiter())
 	}
+
+	endpointslicemetrics.RegisterMetrics()
 
 	c := &Controller{
 		client:           client,
@@ -79,11 +82,11 @@ func NewController(podInformer coreinformers.PodInformer,
 	}
 
 	serviceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: c.enqueueService,
+		AddFunc: c.onServiceUpdate,
 		UpdateFunc: func(old, cur interface{}) {
-			c.enqueueService(cur)
+			c.onServiceUpdate(cur)
 		},
-		DeleteFunc: c.enqueueService,
+		DeleteFunc: c.onServiceDelete,
 	})
 	c.serviceLister = serviceInformer.Lister()
 	c.servicesSynced = serviceInformer.Informer().HasSynced
@@ -108,11 +111,14 @@ func NewController(podInformer coreinformers.PodInformer,
 		client:               c.client,
 		nodeLister:           c.nodeLister,
 		maxEndpointsPerSlice: c.maxEndpointsPerSlice,
+		metricsCache:         endpointslicemetrics.NewCache(maxEndpointsPerSlice),
 	}
 	c.triggerTimeTracker = endpointutil.NewTriggerTimeTracker()
 
 	c.eventBroadcaster = broadcaster
 	c.eventRecorder = recorder
+
+	c.serviceSelectorCache = endpointutil.NewServiceSelectorCache()
 
 	return c
 }
@@ -137,14 +143,14 @@ type Controller struct {
 	// Added as a member to the struct to allow injection for testing.
 	podsSynced cache.InformerSynced
 
-	// endpointSliceLister is able to list/get pods and is populated by the
+	// endpointSliceLister is able to list/get endpoint slices and is populated by the
 	// shared informer passed to NewController
 	endpointSliceLister discoverylisters.EndpointSliceLister
 	// endpointSlicesSynced returns true if the endpoint slice shared informer has been synced at least once.
 	// Added as a member to the struct to allow injection for testing.
 	endpointSlicesSynced cache.InformerSynced
 
-	// nodeLister is able to list/get pods and is populated by the
+	// nodeLister is able to list/get nodes and is populated by the
 	// shared informer passed to NewController
 	nodeLister corelisters.NodeLister
 	// nodesSynced returns true if the node shared informer has been synced at least once.
@@ -159,7 +165,7 @@ type Controller struct {
 	triggerTimeTracker *endpointutil.TriggerTimeTracker
 
 	// Services that need to be updated. A channel is inappropriate here,
-	// because it allowes services with lots of pods to be serviced much
+	// because it allows services with lots of pods to be serviced much
 	// more often than services with few pods; it also would cause a
 	// service that's inserted multiple times to be processed more than
 	// necessary.
@@ -172,6 +178,10 @@ type Controller struct {
 	// workerLoopPeriod is the time between worker runs. The workers
 	// process the queue of service and pod changes
 	workerLoopPeriod time.Duration
+
+	// serviceSelectorCache is a cache of service selectors to avoid high CPU consumption caused by frequent calls
+	// to AsSelectorPreValidated (see #73527)
+	serviceSelectorCache *endpointutil.ServiceSelectorCache
 }
 
 // Run will not return until stopCh is closed.
@@ -179,8 +189,8 @@ func (c *Controller) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 	defer c.queue.ShutDown()
 
-	klog.Infof("Starting endpoint controller")
-	defer klog.Infof("Shutting down endpoint controller")
+	klog.Infof("Starting endpoint slice controller")
+	defer klog.Infof("Shutting down endpoint slice controller")
 
 	if !cache.WaitForNamedCacheSync("endpoint_slice", stopCh, c.podsSynced, c.servicesSynced) {
 		return
@@ -251,6 +261,9 @@ func (c *Controller) syncService(key string) error {
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			c.triggerTimeTracker.DeleteService(namespace, name)
+			c.reconciler.deleteService(namespace, name)
+			// The service has been deleted, return nil so that it won't be retried.
+			return nil
 		}
 		return err
 	}
@@ -300,20 +313,33 @@ func (c *Controller) syncService(key string) error {
 	return nil
 }
 
-// obj could be a *v1.Service or a DeletionalFinalStateUnknown marker item
-func (c *Controller) enqueueService(obj interface{}) {
+// onServiceUpdate updates the Service Selector in the cache and queues the Service for processing.
+func (c *Controller) onServiceUpdate(obj interface{}) {
 	key, err := controller.KeyFunc(obj)
 	if err != nil {
-		utilruntime.HandleError(fmt.Errorf("Couldn't get key for object"))
+		utilruntime.HandleError(fmt.Errorf("Couldn't get key for object %+v: %v", obj, err))
 		return
 	}
 
+	_ = c.serviceSelectorCache.Update(key, obj.(*v1.Service).Spec.Selector)
+	c.queue.Add(key)
+}
+
+// onServiceDelete removes the Service Selector from the cache and queues the Service for processing.
+func (c *Controller) onServiceDelete(obj interface{}) {
+	key, err := controller.KeyFunc(obj)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("Couldn't get key for object %+v: %v", obj, err))
+		return
+	}
+
+	c.serviceSelectorCache.Delete(key)
 	c.queue.Add(key)
 }
 
 func (c *Controller) addPod(obj interface{}) {
 	pod := obj.(*v1.Pod)
-	services, err := endpointutil.GetPodServiceMemberships(c.serviceLister, pod)
+	services, err := c.serviceSelectorCache.GetPodServiceMemberships(c.serviceLister, pod)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("Unable to get pod %s/%s's service memberships: %v", pod.Namespace, pod.Name, err))
 		return
@@ -324,7 +350,7 @@ func (c *Controller) addPod(obj interface{}) {
 }
 
 func (c *Controller) updatePod(old, cur interface{}) {
-	services := endpointutil.GetServicesToUpdateOnPodChange(c.serviceLister, old, cur, podEndpointChanged)
+	services := endpointutil.GetServicesToUpdateOnPodChange(c.serviceLister, c.serviceSelectorCache, old, cur, podEndpointChanged)
 	for key := range services {
 		c.queue.Add(key)
 	}

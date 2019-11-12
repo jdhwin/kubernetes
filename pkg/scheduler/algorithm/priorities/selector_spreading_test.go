@@ -24,8 +24,8 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
-	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
-	schedulertesting "k8s.io/kubernetes/pkg/scheduler/testing"
+	fakelisters "k8s.io/kubernetes/pkg/scheduler/listers/fake"
+	nodeinfosnapshot "k8s.io/kubernetes/pkg/scheduler/nodeinfo/snapshot"
 )
 
 func controllerRef(kind, name, uid string) []metav1.OwnerReference {
@@ -158,7 +158,7 @@ func TestSelectorSpreadPriority(t *testing.T) {
 			},
 			nodes:        []string{"machine1", "machine2"},
 			services:     []*v1.Service{{Spec: v1.ServiceSpec{Selector: labels1}}},
-			expectedList: []framework.NodeScore{{Name: "machine1", Score: 5}, {Name: "machine2", Score: 0}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 50}, {Name: "machine2", Score: 0}},
 			name:         "four pods, three service pods",
 		},
 		{
@@ -170,7 +170,7 @@ func TestSelectorSpreadPriority(t *testing.T) {
 			},
 			nodes:        []string{"machine1", "machine2"},
 			services:     []*v1.Service{{Spec: v1.ServiceSpec{Selector: map[string]string{"baz": "blah"}}}},
-			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: 5}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: 50}},
 			name:         "service with partial pod label matches",
 		},
 		{
@@ -226,7 +226,7 @@ func TestSelectorSpreadPriority(t *testing.T) {
 			rcs:      []*v1.ReplicationController{{Spec: v1.ReplicationControllerSpec{Selector: map[string]string{"foo": "bar"}}}},
 			services: []*v1.Service{{Spec: v1.ServiceSpec{Selector: map[string]string{"bar": "foo"}}}},
 			// Taken together Service and Replication Controller should match no pods.
-			expectedList: []framework.NodeScore{{Name: "machine1", Score: 10}, {Name: "machine2", Score: 10}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: framework.MaxNodeScore}, {Name: "machine2", Score: framework.MaxNodeScore}},
 			name:         "disjoined service and replication controller matches no pods",
 		},
 		{
@@ -240,7 +240,7 @@ func TestSelectorSpreadPriority(t *testing.T) {
 			services: []*v1.Service{{Spec: v1.ServiceSpec{Selector: map[string]string{"bar": "foo"}}}},
 			rss:      []*apps.ReplicaSet{{Spec: apps.ReplicaSetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}}}}},
 			// We use ReplicaSet, instead of ReplicationController. The result should be exactly as above.
-			expectedList: []framework.NodeScore{{Name: "machine1", Score: 10}, {Name: "machine2", Score: 10}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: framework.MaxNodeScore}, {Name: "machine2", Score: framework.MaxNodeScore}},
 			name:         "disjoined service and replica set matches no pods",
 		},
 		{
@@ -253,7 +253,7 @@ func TestSelectorSpreadPriority(t *testing.T) {
 			nodes:        []string{"machine1", "machine2"},
 			services:     []*v1.Service{{Spec: v1.ServiceSpec{Selector: map[string]string{"bar": "foo"}}}},
 			sss:          []*apps.StatefulSet{{Spec: apps.StatefulSetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}}}}},
-			expectedList: []framework.NodeScore{{Name: "machine1", Score: 10}, {Name: "machine2", Score: 10}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: framework.MaxNodeScore}, {Name: "machine2", Score: framework.MaxNodeScore}},
 			name:         "disjoined service and stateful set matches no pods",
 		},
 		{
@@ -304,7 +304,7 @@ func TestSelectorSpreadPriority(t *testing.T) {
 			},
 			nodes:        []string{"machine1", "machine2"},
 			rcs:          []*v1.ReplicationController{{Spec: v1.ReplicationControllerSpec{Selector: map[string]string{"baz": "blah"}}}},
-			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: 5}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: 50}},
 			name:         "Another replication controller with partial pod label matches",
 		},
 		{
@@ -317,7 +317,7 @@ func TestSelectorSpreadPriority(t *testing.T) {
 			nodes: []string{"machine1", "machine2"},
 			rss:   []*apps.ReplicaSet{{Spec: apps.ReplicaSetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"baz": "blah"}}}}},
 			// We use ReplicaSet, instead of ReplicationController. The result should be exactly as above.
-			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: 5}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: 50}},
 			name:         "Another replication set with partial pod label matches",
 		},
 		{
@@ -330,30 +330,32 @@ func TestSelectorSpreadPriority(t *testing.T) {
 			nodes: []string{"machine1", "machine2"},
 			sss:   []*apps.StatefulSet{{Spec: apps.StatefulSetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"baz": "blah"}}}}},
 			// We use StatefulSet, instead of ReplicationController. The result should be exactly as above.
-			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: 5}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: 50}},
 			name:         "Another stateful set with partial pod label matches",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			nodeNameToInfo := schedulernodeinfo.CreateNodeNameToInfoMap(test.pods, makeNodeList(test.nodes))
+			nodes := makeNodeList(test.nodes)
+			snapshot := nodeinfosnapshot.NewSnapshot(test.pods, nodes)
 			selectorSpread := SelectorSpread{
-				serviceLister:     schedulertesting.FakeServiceLister(test.services),
-				controllerLister:  schedulertesting.FakeControllerLister(test.rcs),
-				replicaSetLister:  schedulertesting.FakeReplicaSetLister(test.rss),
-				statefulSetLister: schedulertesting.FakeStatefulSetLister(test.sss),
+				serviceLister:     fakelisters.ServiceLister(test.services),
+				controllerLister:  fakelisters.ControllerLister(test.rcs),
+				replicaSetLister:  fakelisters.ReplicaSetLister(test.rss),
+				statefulSetLister: fakelisters.StatefulSetLister(test.sss),
 			}
 
-			metaDataProducer := NewPriorityMetadataFactory(
-				schedulertesting.FakeServiceLister(test.services),
-				schedulertesting.FakeControllerLister(test.rcs),
-				schedulertesting.FakeReplicaSetLister(test.rss),
-				schedulertesting.FakeStatefulSetLister(test.sss))
-			metaData := metaDataProducer(test.pod, nodeNameToInfo)
+			metaDataProducer := NewMetadataFactory(
+				fakelisters.ServiceLister(test.services),
+				fakelisters.ControllerLister(test.rcs),
+				fakelisters.ReplicaSetLister(test.rss),
+				fakelisters.StatefulSetLister(test.sss),
+				1,
+			)
+			metaData := metaDataProducer(test.pod, nodes, snapshot)
 
-			ttp := priorityFunction(selectorSpread.CalculateSpreadPriorityMap, selectorSpread.CalculateSpreadPriorityReduce, metaData)
-			list, err := ttp(test.pod, nodeNameToInfo, makeNodeList(test.nodes))
+			list, err := runMapReducePriority(selectorSpread.CalculateSpreadPriorityMap, selectorSpread.CalculateSpreadPriorityReduce, metaData, test.pod, snapshot, makeNodeList(test.nodes))
 			if err != nil {
 				t.Errorf("unexpected error: %v \n", err)
 			}
@@ -478,8 +480,8 @@ func TestZoneSelectorSpreadPriority(t *testing.T) {
 			services: []*v1.Service{{Spec: v1.ServiceSpec{Selector: labels1}}},
 			expectedList: []framework.NodeScore{
 				{Name: nodeMachine1Zone1, Score: framework.MaxNodeScore},
-				{Name: nodeMachine1Zone2, Score: 0}, // Already have pod on machine
-				{Name: nodeMachine2Zone2, Score: 3}, // Already have pod in zone
+				{Name: nodeMachine1Zone2, Score: 0},  // Already have pod on machine
+				{Name: nodeMachine2Zone2, Score: 33}, // Already have pod in zone
 				{Name: nodeMachine1Zone3, Score: framework.MaxNodeScore},
 				{Name: nodeMachine2Zone3, Score: framework.MaxNodeScore},
 				{Name: nodeMachine3Zone3, Score: framework.MaxNodeScore},
@@ -498,11 +500,11 @@ func TestZoneSelectorSpreadPriority(t *testing.T) {
 			services: []*v1.Service{{Spec: v1.ServiceSpec{Selector: labels1}}},
 			expectedList: []framework.NodeScore{
 				{Name: nodeMachine1Zone1, Score: framework.MaxNodeScore},
-				{Name: nodeMachine1Zone2, Score: 0}, // Pod on node
-				{Name: nodeMachine2Zone2, Score: 0}, // Pod on node
-				{Name: nodeMachine1Zone3, Score: 6}, // Pod in zone
-				{Name: nodeMachine2Zone3, Score: 3}, // Pod on node
-				{Name: nodeMachine3Zone3, Score: 6}, // Pod in zone
+				{Name: nodeMachine1Zone2, Score: 0},  // Pod on node
+				{Name: nodeMachine2Zone2, Score: 0},  // Pod on node
+				{Name: nodeMachine1Zone3, Score: 66}, // Pod in zone
+				{Name: nodeMachine2Zone3, Score: 33}, // Pod on node
+				{Name: nodeMachine3Zone3, Score: 66}, // Pod in zone
 			},
 			name: "five pods, 3 matching (z2=2, z3=1)",
 		},
@@ -516,12 +518,12 @@ func TestZoneSelectorSpreadPriority(t *testing.T) {
 			},
 			services: []*v1.Service{{Spec: v1.ServiceSpec{Selector: labels1}}},
 			expectedList: []framework.NodeScore{
-				{Name: nodeMachine1Zone1, Score: 0}, // Pod on node
-				{Name: nodeMachine1Zone2, Score: 0}, // Pod on node
-				{Name: nodeMachine2Zone2, Score: 3}, // Pod in zone
-				{Name: nodeMachine1Zone3, Score: 0}, // Pod on node
-				{Name: nodeMachine2Zone3, Score: 3}, // Pod in zone
-				{Name: nodeMachine3Zone3, Score: 3}, // Pod in zone
+				{Name: nodeMachine1Zone1, Score: 0},  // Pod on node
+				{Name: nodeMachine1Zone2, Score: 0},  // Pod on node
+				{Name: nodeMachine2Zone2, Score: 33}, // Pod in zone
+				{Name: nodeMachine1Zone3, Score: 0},  // Pod on node
+				{Name: nodeMachine2Zone3, Score: 33}, // Pod in zone
+				{Name: nodeMachine3Zone3, Score: 33}, // Pod in zone
 			},
 			name: "four pods, 3 matching (z1=1, z2=1, z3=1)",
 		},
@@ -535,12 +537,12 @@ func TestZoneSelectorSpreadPriority(t *testing.T) {
 			},
 			services: []*v1.Service{{Spec: v1.ServiceSpec{Selector: labels1}}},
 			expectedList: []framework.NodeScore{
-				{Name: nodeMachine1Zone1, Score: 0}, // Pod on node
-				{Name: nodeMachine1Zone2, Score: 0}, // Pod on node
-				{Name: nodeMachine2Zone2, Score: 3}, // Pod in zone
-				{Name: nodeMachine1Zone3, Score: 0}, // Pod on node
-				{Name: nodeMachine2Zone3, Score: 3}, // Pod in zone
-				{Name: nodeMachine3Zone3, Score: 3}, // Pod in zone
+				{Name: nodeMachine1Zone1, Score: 0},  // Pod on node
+				{Name: nodeMachine1Zone2, Score: 0},  // Pod on node
+				{Name: nodeMachine2Zone2, Score: 33}, // Pod in zone
+				{Name: nodeMachine1Zone3, Score: 0},  // Pod on node
+				{Name: nodeMachine2Zone3, Score: 33}, // Pod in zone
+				{Name: nodeMachine3Zone3, Score: 33}, // Pod in zone
 			},
 			name: "four pods, 3 matching (z1=1, z2=1, z3=1)",
 		},
@@ -561,11 +563,11 @@ func TestZoneSelectorSpreadPriority(t *testing.T) {
 				// pod on m1.z2 and putting a pod on m2.z2, but the ordering is correct.
 				// This is also consistent with what we have already.
 				{Name: nodeMachine1Zone1, Score: framework.MaxNodeScore}, // No pods in zone
-				{Name: nodeMachine1Zone2, Score: 5},                      // Pod on node
-				{Name: nodeMachine2Zone2, Score: 6},                      // Pod in zone
+				{Name: nodeMachine1Zone2, Score: 50},                     // Pod on node
+				{Name: nodeMachine2Zone2, Score: 66},                     // Pod in zone
 				{Name: nodeMachine1Zone3, Score: 0},                      // Two pods on node
-				{Name: nodeMachine2Zone3, Score: 3},                      // Pod in zone
-				{Name: nodeMachine3Zone3, Score: 3},                      // Pod in zone
+				{Name: nodeMachine2Zone3, Score: 33},                     // Pod in zone
+				{Name: nodeMachine3Zone3, Score: 33},                     // Pod in zone
 			},
 			name: "Replication controller spreading (z1=0, z2=1, z3=2)",
 		},
@@ -573,22 +575,24 @@ func TestZoneSelectorSpreadPriority(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			nodeNameToInfo := schedulernodeinfo.CreateNodeNameToInfoMap(test.pods, makeLabeledNodeList(labeledNodes))
+			nodes := makeLabeledNodeList(labeledNodes)
+			snapshot := nodeinfosnapshot.NewSnapshot(test.pods, nodes)
 			selectorSpread := SelectorSpread{
-				serviceLister:     schedulertesting.FakeServiceLister(test.services),
-				controllerLister:  schedulertesting.FakeControllerLister(test.rcs),
-				replicaSetLister:  schedulertesting.FakeReplicaSetLister(test.rss),
-				statefulSetLister: schedulertesting.FakeStatefulSetLister(test.sss),
+				serviceLister:     fakelisters.ServiceLister(test.services),
+				controllerLister:  fakelisters.ControllerLister(test.rcs),
+				replicaSetLister:  fakelisters.ReplicaSetLister(test.rss),
+				statefulSetLister: fakelisters.StatefulSetLister(test.sss),
 			}
 
-			metaDataProducer := NewPriorityMetadataFactory(
-				schedulertesting.FakeServiceLister(test.services),
-				schedulertesting.FakeControllerLister(test.rcs),
-				schedulertesting.FakeReplicaSetLister(test.rss),
-				schedulertesting.FakeStatefulSetLister(test.sss))
-			metaData := metaDataProducer(test.pod, nodeNameToInfo)
-			ttp := priorityFunction(selectorSpread.CalculateSpreadPriorityMap, selectorSpread.CalculateSpreadPriorityReduce, metaData)
-			list, err := ttp(test.pod, nodeNameToInfo, makeLabeledNodeList(labeledNodes))
+			metaDataProducer := NewMetadataFactory(
+				fakelisters.ServiceLister(test.services),
+				fakelisters.ControllerLister(test.rcs),
+				fakelisters.ReplicaSetLister(test.rss),
+				fakelisters.StatefulSetLister(test.sss),
+				1,
+			)
+			metaData := metaDataProducer(test.pod, nodes, snapshot)
+			list, err := runMapReducePriority(selectorSpread.CalculateSpreadPriorityMap, selectorSpread.CalculateSpreadPriorityReduce, metaData, test.pod, snapshot, makeLabeledNodeList(labeledNodes))
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -692,8 +696,8 @@ func TestZoneSpreadPriority(t *testing.T) {
 			},
 			nodes:    labeledNodes,
 			services: []*v1.Service{{Spec: v1.ServiceSpec{Selector: labels1}}},
-			expectedList: []framework.NodeScore{{Name: "machine11", Score: 5}, {Name: "machine12", Score: 5},
-				{Name: "machine21", Score: 5}, {Name: "machine22", Score: 5},
+			expectedList: []framework.NodeScore{{Name: "machine11", Score: 50}, {Name: "machine12", Score: 50},
+				{Name: "machine21", Score: 50}, {Name: "machine22", Score: 50},
 				{Name: "machine01", Score: 0}, {Name: "machine02", Score: 0}},
 			name: "three pods, two service pods on different machines",
 		},
@@ -722,8 +726,8 @@ func TestZoneSpreadPriority(t *testing.T) {
 			},
 			nodes:    labeledNodes,
 			services: []*v1.Service{{Spec: v1.ServiceSpec{Selector: labels1}}},
-			expectedList: []framework.NodeScore{{Name: "machine11", Score: 6}, {Name: "machine12", Score: 6},
-				{Name: "machine21", Score: 3}, {Name: "machine22", Score: 3},
+			expectedList: []framework.NodeScore{{Name: "machine11", Score: 66}, {Name: "machine12", Score: 66},
+				{Name: "machine21", Score: 33}, {Name: "machine22", Score: 33},
 				{Name: "machine01", Score: 0}, {Name: "machine02", Score: 0}},
 			name: "four pods, three service pods",
 		},
@@ -736,8 +740,8 @@ func TestZoneSpreadPriority(t *testing.T) {
 			},
 			nodes:    labeledNodes,
 			services: []*v1.Service{{Spec: v1.ServiceSpec{Selector: map[string]string{"baz": "blah"}}}},
-			expectedList: []framework.NodeScore{{Name: "machine11", Score: 3}, {Name: "machine12", Score: 3},
-				{Name: "machine21", Score: 6}, {Name: "machine22", Score: 6},
+			expectedList: []framework.NodeScore{{Name: "machine11", Score: 33}, {Name: "machine12", Score: 33},
+				{Name: "machine21", Score: 66}, {Name: "machine22", Score: 66},
 				{Name: "machine01", Score: 0}, {Name: "machine02", Score: 0}},
 			name: "service with partial pod label matches",
 		},
@@ -751,8 +755,8 @@ func TestZoneSpreadPriority(t *testing.T) {
 			},
 			nodes:    labeledNodes,
 			services: []*v1.Service{{Spec: v1.ServiceSpec{Selector: labels1}}},
-			expectedList: []framework.NodeScore{{Name: "machine11", Score: 7}, {Name: "machine12", Score: 7},
-				{Name: "machine21", Score: 5}, {Name: "machine22", Score: 5},
+			expectedList: []framework.NodeScore{{Name: "machine11", Score: 75}, {Name: "machine12", Score: 75},
+				{Name: "machine21", Score: 50}, {Name: "machine22", Score: 50},
 				{Name: "machine01", Score: 0}, {Name: "machine02", Score: 0}},
 			name: "service pod on non-zoned node",
 		},
@@ -765,17 +769,19 @@ func TestZoneSpreadPriority(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			nodeNameToInfo := schedulernodeinfo.CreateNodeNameToInfoMap(test.pods, makeLabeledNodeList(test.nodes))
-			zoneSpread := ServiceAntiAffinity{podLister: schedulertesting.FakePodLister(test.pods), serviceLister: schedulertesting.FakeServiceLister(test.services), label: "zone"}
+			nodes := makeLabeledNodeList(labeledNodes)
+			snapshot := nodeinfosnapshot.NewSnapshot(test.pods, nodes)
+			zoneSpread := ServiceAntiAffinity{podLister: snapshot.Pods(), serviceLister: fakelisters.ServiceLister(test.services), labels: []string{"zone"}}
 
-			metaDataProducer := NewPriorityMetadataFactory(
-				schedulertesting.FakeServiceLister(test.services),
-				schedulertesting.FakeControllerLister(rcs),
-				schedulertesting.FakeReplicaSetLister(rss),
-				schedulertesting.FakeStatefulSetLister(sss))
-			metaData := metaDataProducer(test.pod, nodeNameToInfo)
-			ttp := priorityFunction(zoneSpread.CalculateAntiAffinityPriorityMap, zoneSpread.CalculateAntiAffinityPriorityReduce, metaData)
-			list, err := ttp(test.pod, nodeNameToInfo, makeLabeledNodeList(test.nodes))
+			metaDataProducer := NewMetadataFactory(
+				fakelisters.ServiceLister(test.services),
+				fakelisters.ControllerLister(rcs),
+				fakelisters.ReplicaSetLister(rss),
+				fakelisters.StatefulSetLister(sss),
+				1,
+			)
+			metaData := metaDataProducer(test.pod, nodes, snapshot)
+			list, err := runMapReducePriority(zoneSpread.CalculateAntiAffinityPriorityMap, zoneSpread.CalculateAntiAffinityPriorityReduce, metaData, test.pod, snapshot, makeLabeledNodeList(test.nodes))
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -787,29 +793,6 @@ func TestZoneSpreadPriority(t *testing.T) {
 				t.Errorf("expected %#v, got %#v", test.expectedList, list)
 			}
 		})
-	}
-}
-
-func TestGetNodeClassificationByLabels(t *testing.T) {
-	const machine01 = "machine01"
-	const machine02 = "machine02"
-	const zoneA = "zoneA"
-	zone1 := map[string]string{
-		"zone": zoneA,
-	}
-	labeledNodes := map[string]map[string]string{
-		machine01: zone1,
-	}
-	expectedNonLabeledNodes := []string{machine02}
-	serviceAffinity := ServiceAntiAffinity{label: "zone"}
-	newLabeledNodes, noNonLabeledNodes := serviceAffinity.getNodeClassificationByLabels(makeLabeledNodeList(labeledNodes))
-	noLabeledNodes, newnonLabeledNodes := serviceAffinity.getNodeClassificationByLabels(makeNodeList(expectedNonLabeledNodes))
-	label, _ := newLabeledNodes[machine01]
-	if label != zoneA && len(noNonLabeledNodes) != 0 {
-		t.Errorf("Expected only labeled node with label zoneA and no noNonLabeledNodes")
-	}
-	if len(noLabeledNodes) != 0 && newnonLabeledNodes[0] != machine02 {
-		t.Errorf("Expected only non labelled nodes")
 	}
 }
 

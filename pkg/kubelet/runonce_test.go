@@ -75,7 +75,7 @@ func TestRunOnce(t *testing.T) {
 		rootDirectory:    basePath,
 		recorder:         &record.FakeRecorder{},
 		cadvisor:         cadvisor,
-		nodeInfo:         testNodeInfo{},
+		nodeLister:       testNodeLister{},
 		statusManager:    status.NewManager(nil, podManager, &statustest.FakePodDeletionSafetyProvider{}),
 		podManager:       podManager,
 		os:               &containertest.FakeOS{},
@@ -129,7 +129,7 @@ func TestRunOnce(t *testing.T) {
 
 	kb.evictionManager = evictionManager
 	kb.admitHandlers.AddPodAdmitHandler(evictionAdmitHandler)
-	kb.mounter = &mount.FakeMounter{}
+	kb.mounter = mount.NewFakeMounter(nil)
 	if err := kb.setupDataDirs(); err != nil {
 		t.Errorf("Failed to init data dirs: %v", err)
 	}

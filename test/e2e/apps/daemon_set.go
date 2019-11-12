@@ -38,6 +38,7 @@ import (
 	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
+	testutils "k8s.io/kubernetes/test/utils"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
@@ -57,6 +58,35 @@ const (
 // NamespaceNodeSelectors the annotation key scheduler.alpha.kubernetes.io/node-selector is for assigning
 // node selectors labels to namespaces
 var NamespaceNodeSelectors = []string{"scheduler.alpha.kubernetes.io/node-selector"}
+
+type updateDSFunc func(*appsv1.DaemonSet)
+
+// updateDaemonSetWithRetries updates daemonsets with the given applyUpdate func
+// until it succeeds or a timeout expires.
+func updateDaemonSetWithRetries(c clientset.Interface, namespace, name string, applyUpdate updateDSFunc) (ds *appsv1.DaemonSet, err error) {
+	daemonsets := c.AppsV1().DaemonSets(namespace)
+	var updateErr error
+	pollErr := wait.PollImmediate(10*time.Millisecond, 1*time.Minute, func() (bool, error) {
+		if ds, err = daemonsets.Get(name, metav1.GetOptions{}); err != nil {
+			if testutils.IsRetryableAPIError(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		// Apply the update, then attempt to push it to the apiserver.
+		applyUpdate(ds)
+		if ds, err = daemonsets.Update(ds); err == nil {
+			framework.Logf("Updating DaemonSet %s", name)
+			return true, nil
+		}
+		updateErr = err
+		return false, nil
+	})
+	if pollErr == wait.ErrWaitTimeout {
+		pollErr = fmt.Errorf("couldn't apply the provided updated to DaemonSet %q: %v", name, updateErr)
+	}
+	return ds, pollErr
+}
 
 // This test must be run in serial because it assumes the Daemon Set pods will
 // always get scheduled.  If we run other tests in parallel, this may not
@@ -298,7 +328,7 @@ var _ = SIGDescribe("Daemon set [Serial]", func() {
 		checkDaemonSetPodsLabels(listDaemonPods(c, ns, label), firstHash)
 
 		ginkgo.By("Update daemon pods image.")
-		patch := getDaemonSetImagePatch(ds.Spec.Template.Spec.Containers[0].Name, RedisImage)
+		patch := getDaemonSetImagePatch(ds.Spec.Template.Spec.Containers[0].Name, AgnhostImage)
 		ds, err = c.AppsV1().DaemonSets(ns).Patch(dsName, types.StrategicMergePatchType, []byte(patch))
 		framework.ExpectNoError(err)
 
@@ -347,7 +377,7 @@ var _ = SIGDescribe("Daemon set [Serial]", func() {
 		checkDaemonSetPodsLabels(listDaemonPods(c, ns, label), hash)
 
 		ginkgo.By("Update daemon pods image.")
-		patch := getDaemonSetImagePatch(ds.Spec.Template.Spec.Containers[0].Name, RedisImage)
+		patch := getDaemonSetImagePatch(ds.Spec.Template.Spec.Containers[0].Name, AgnhostImage)
 		ds, err = c.AppsV1().DaemonSets(ns).Patch(dsName, types.StrategicMergePatchType, []byte(patch))
 		framework.ExpectNoError(err)
 
@@ -359,7 +389,7 @@ var _ = SIGDescribe("Daemon set [Serial]", func() {
 		retryTimeout := dsRetryTimeout + time.Duration(nodeCount*30)*time.Second
 
 		ginkgo.By("Check that daemon pods images are updated.")
-		err = wait.PollImmediate(dsRetryPeriod, retryTimeout, checkDaemonPodsImageAndAvailability(c, ds, RedisImage, 1))
+		err = wait.PollImmediate(dsRetryPeriod, retryTimeout, checkDaemonPodsImageAndAvailability(c, ds, AgnhostImage, 1))
 		framework.ExpectNoError(err)
 
 		ginkgo.By("Check that daemon pods are still running on every node of the cluster.")
@@ -399,7 +429,7 @@ var _ = SIGDescribe("Daemon set [Serial]", func() {
 		framework.Logf("Update the DaemonSet to trigger a rollout")
 		// We use a nonexistent image here, so that we make sure it won't finish
 		newImage := "foo:non-existent"
-		newDS, err := framework.UpdateDaemonSetWithRetries(c, ns, ds.Name, func(update *appsv1.DaemonSet) {
+		newDS, err := updateDaemonSetWithRetries(c, ns, ds.Name, func(update *appsv1.DaemonSet) {
 			update.Spec.Template.Spec.Containers[0].Image = newImage
 		})
 		framework.ExpectNoError(err)
@@ -432,7 +462,7 @@ var _ = SIGDescribe("Daemon set [Serial]", func() {
 		framework.ExpectNotEqual(len(newPods), 0)
 
 		framework.Logf("Roll back the DaemonSet before rollout is complete")
-		rollbackDS, err := framework.UpdateDaemonSetWithRetries(c, ns, ds.Name, func(update *appsv1.DaemonSet) {
+		rollbackDS, err := updateDaemonSetWithRetries(c, ns, ds.Name, func(update *appsv1.DaemonSet) {
 			update.Spec.Template.Spec.Containers[0].Image = image
 		})
 		framework.ExpectNoError(err)

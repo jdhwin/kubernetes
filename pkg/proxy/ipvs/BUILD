@@ -16,6 +16,7 @@ go_test(
     embed = [":go_default_library"],
     deps = [
         "//pkg/proxy:go_default_library",
+        "//pkg/proxy/healthcheck:go_default_library",
         "//pkg/proxy/ipvs/testing:go_default_library",
         "//pkg/proxy/util:go_default_library",
         "//pkg/proxy/util/testing:go_default_library",
@@ -76,6 +77,10 @@ go_library(
         "//vendor/k8s.io/utils/exec:go_default_library",
         "//vendor/k8s.io/utils/net:go_default_library",
     ] + select({
+        "@io_bazel_rules_go//go/platform:android": [
+            "//vendor/github.com/vishvananda/netlink:go_default_library",
+            "//vendor/golang.org/x/sys/unix:go_default_library",
+        ],
         "@io_bazel_rules_go//go/platform:linux": [
             "//vendor/github.com/vishvananda/netlink:go_default_library",
             "//vendor/golang.org/x/sys/unix:go_default_library",

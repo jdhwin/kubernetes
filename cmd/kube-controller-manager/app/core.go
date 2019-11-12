@@ -33,9 +33,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	cacheddiscovery "k8s.io/client-go/discovery/cached/memory"
+	storagev1informer "k8s.io/client-go/informers/storage/v1"
+	storagev1beta1informer "k8s.io/client-go/informers/storage/v1beta1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/metadata"
 	restclient "k8s.io/client-go/rest"
+	"k8s.io/component-base/metrics/prometheus/ratelimiter"
 	csitrans "k8s.io/csi-translation-lib"
 	"k8s.io/kubernetes/pkg/controller"
 	cloudcontroller "k8s.io/kubernetes/pkg/controller/cloud"
@@ -62,7 +65,6 @@ import (
 	kubefeatures "k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/quota/v1/generic"
 	quotainstall "k8s.io/kubernetes/pkg/quota/v1/install"
-	"k8s.io/kubernetes/pkg/util/metrics"
 	netutils "k8s.io/utils/net"
 )
 
@@ -163,7 +165,7 @@ func startNodeIpamController(ctx ControllerContext) (http.Handler, bool, error) 
 
 func startNodeLifecycleController(ctx ControllerContext) (http.Handler, bool, error) {
 	lifecycleController, err := lifecyclecontroller.NewNodeLifecycleController(
-		ctx.InformerFactory.Coordination().V1beta1().Leases(),
+		ctx.InformerFactory.Coordination().V1().Leases(),
 		ctx.InformerFactory.Core().V1().Pods(),
 		ctx.InformerFactory.Core().V1().Nodes(),
 		ctx.InformerFactory.Apps().V1().DaemonSets(),
@@ -179,7 +181,6 @@ func startNodeLifecycleController(ctx ControllerContext) (http.Handler, bool, er
 		ctx.ComponentConfig.NodeLifecycleController.UnhealthyZoneThreshold,
 		ctx.ComponentConfig.NodeLifecycleController.EnableTaintManager,
 		utilfeature.DefaultFeatureGate.Enabled(features.TaintBasedEvictions),
-		utilfeature.DefaultFeatureGate.Enabled(features.TaintNodesByCondition),
 	)
 	if err != nil {
 		return nil, true, err
@@ -279,6 +280,17 @@ func startAttachDetachController(ctx ControllerContext) (http.Handler, bool, err
 		return nil, true, fmt.Errorf("duration time must be greater than one second as set via command line option reconcile-sync-loop-period")
 	}
 
+	var (
+		csiNodeInformer   storagev1informer.CSINodeInformer
+		csiDriverInformer storagev1beta1informer.CSIDriverInformer
+	)
+	if utilfeature.DefaultFeatureGate.Enabled(features.CSINodeInfo) {
+		csiNodeInformer = ctx.InformerFactory.Storage().V1().CSINodes()
+	}
+	if utilfeature.DefaultFeatureGate.Enabled(features.CSIDriverRegistry) {
+		csiDriverInformer = ctx.InformerFactory.Storage().V1beta1().CSIDrivers()
+	}
+
 	attachDetachController, attachDetachControllerErr :=
 		attachdetach.NewAttachDetachController(
 			ctx.ClientBuilder.ClientOrDie("attachdetach-controller"),
@@ -286,8 +298,8 @@ func startAttachDetachController(ctx ControllerContext) (http.Handler, bool, err
 			ctx.InformerFactory.Core().V1().Nodes(),
 			ctx.InformerFactory.Core().V1().PersistentVolumeClaims(),
 			ctx.InformerFactory.Core().V1().PersistentVolumes(),
-			ctx.InformerFactory.Storage().V1beta1().CSINodes(),
-			ctx.InformerFactory.Storage().V1beta1().CSIDrivers(),
+			csiNodeInformer,
+			csiDriverInformer,
 			ctx.Cloud,
 			ProbeAttachableVolumePlugins(),
 			GetDynamicPluginProber(ctx.ComponentConfig.PersistentVolumeBinderController.VolumeConfiguration),
@@ -347,6 +359,7 @@ func startPodGCController(ctx ControllerContext) (http.Handler, bool, error) {
 	go podgc.NewPodGC(
 		ctx.ClientBuilder.ClientOrDie("pod-garbage-collector"),
 		ctx.InformerFactory.Core().V1().Pods(),
+		ctx.InformerFactory.Core().V1().Nodes(),
 		int(ctx.ComponentConfig.PodGCController.TerminatedPodGCThreshold),
 	).Run(ctx.Stop)
 	return nil, true, nil
@@ -370,7 +383,7 @@ func startResourceQuotaController(ctx ControllerContext) (http.Handler, bool, er
 		Registry:                  generic.NewRegistry(quotaConfiguration.Evaluators()),
 	}
 	if resourceQuotaControllerClient.CoreV1().RESTClient().GetRateLimiter() != nil {
-		if err := metrics.RegisterMetricAndTrackRateLimiterUsage("resource_quota_controller", resourceQuotaControllerClient.CoreV1().RESTClient().GetRateLimiter()); err != nil {
+		if err := ratelimiter.RegisterMetricAndTrackRateLimiterUsage("resource_quota_controller", resourceQuotaControllerClient.CoreV1().RESTClient().GetRateLimiter()); err != nil {
 			return nil, true, err
 		}
 	}

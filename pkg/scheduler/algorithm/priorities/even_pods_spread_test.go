@@ -20,19 +20,19 @@ import (
 	"reflect"
 	"testing"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
-	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
+	nodeinfosnapshot "k8s.io/kubernetes/pkg/scheduler/nodeinfo/snapshot"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
 )
 
-func Test_topologySpreadConstraintsMap_initialize(t *testing.T) {
+func Test_podTopologySpreadMap_initialize(t *testing.T) {
 	tests := []struct {
 		name                string
 		pod                 *v1.Pod
 		nodes               []*v1.Node
-		wantNodeNameMap     map[string]int32
-		wantTopologyPairMap map[topologyPair]*int32
+		wantNodeNameSet     map[string]struct{}
+		wantTopologyPairMap map[topologyPair]*int64
 	}{
 		{
 			name: "normal case",
@@ -45,17 +45,17 @@ func Test_topologySpreadConstraintsMap_initialize(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone1").Label("node", "node-b").Obj(),
 				st.MakeNode().Name("node-x").Label("zone", "zone2").Label("node", "node-x").Obj(),
 			},
-			wantNodeNameMap: map[string]int32{
-				"node-a": 0,
-				"node-b": 0,
-				"node-x": 0,
+			wantNodeNameSet: map[string]struct{}{
+				"node-a": {},
+				"node-b": {},
+				"node-x": {},
 			},
-			wantTopologyPairMap: map[topologyPair]*int32{
-				{key: "zone", value: "zone1"}:  new(int32),
-				{key: "zone", value: "zone2"}:  new(int32),
-				{key: "node", value: "node-a"}: new(int32),
-				{key: "node", value: "node-b"}: new(int32),
-				{key: "node", value: "node-x"}: new(int32),
+			wantTopologyPairMap: map[topologyPair]*int64{
+				{key: "zone", value: "zone1"}:  new(int64),
+				{key: "zone", value: "zone2"}:  new(int64),
+				{key: "node", value: "node-a"}: new(int64),
+				{key: "node", value: "node-b"}: new(int64),
+				{key: "node", value: "node-x"}: new(int64),
 			},
 		},
 		{
@@ -69,26 +69,26 @@ func Test_topologySpreadConstraintsMap_initialize(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("zone", "zone1").Label("node", "node-b").Obj(),
 				st.MakeNode().Name("node-x").Label("node", "node-x").Obj(),
 			},
-			wantNodeNameMap: map[string]int32{
-				"node-a": 0,
-				"node-b": 0,
+			wantNodeNameSet: map[string]struct{}{
+				"node-a": {},
+				"node-b": {},
 			},
-			wantTopologyPairMap: map[topologyPair]*int32{
-				{key: "zone", value: "zone1"}:  new(int32),
-				{key: "node", value: "node-a"}: new(int32),
-				{key: "node", value: "node-b"}: new(int32),
+			wantTopologyPairMap: map[topologyPair]*int64{
+				{key: "zone", value: "zone1"}:  new(int64),
+				{key: "node", value: "node-a"}: new(int64),
+				{key: "node", value: "node-b"}: new(int64),
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tMap := newTopologySpreadConstraintsMap()
-			tMap.initialize(tt.pod, tt.nodes)
-			if !reflect.DeepEqual(tMap.nodeNameToPodCounts, tt.wantNodeNameMap) {
-				t.Errorf("initilize().nodeNameToPodCounts = %#v, want %#v", tMap.nodeNameToPodCounts, tt.wantNodeNameMap)
+			m := newTopologySpreadConstraintsMap()
+			m.initialize(tt.pod, tt.nodes)
+			if !reflect.DeepEqual(m.nodeNameSet, tt.wantNodeNameSet) {
+				t.Errorf("initilize().nodeNameSet = %#v, want %#v", m.nodeNameSet, tt.wantNodeNameSet)
 			}
-			if !reflect.DeepEqual(tMap.topologyPairToPodCounts, tt.wantTopologyPairMap) {
-				t.Errorf("initilize().topologyPairToPodCounts = %#v, want %#v", tMap.topologyPairToPodCounts, tt.wantTopologyPairMap)
+			if !reflect.DeepEqual(m.topologyPairToPodCounts, tt.wantTopologyPairMap) {
+				t.Errorf("initilize().topologyPairToPodCounts = %#v, want %#v", m.topologyPairToPodCounts, tt.wantTopologyPairMap)
 			}
 		})
 	}
@@ -121,8 +121,8 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("node", "node-b").Obj(),
 			},
 			want: []framework.NodeScore{
-				{Name: "node-a", Score: 10},
-				{Name: "node-b", Score: 10},
+				{Name: "node-a", Score: 100},
+				{Name: "node-b", Score: 100},
 			},
 		},
 		{
@@ -143,7 +143,7 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("node", "node-b").Obj(),
 			},
 			want: []framework.NodeScore{
-				{Name: "node-a", Score: 10},
+				{Name: "node-a", Score: 100},
 			},
 		},
 		{
@@ -160,14 +160,14 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 				st.MakeNode().Name("node-b").Label("node", "node-b").Obj(),
 			},
 			want: []framework.NodeScore{
-				{Name: "node-a", Score: 10},
-				{Name: "node-b", Score: 10},
+				{Name: "node-a", Score: 100},
+				{Name: "node-b", Score: 100},
 			},
 		},
 		{
 			// matching pods spread as 2/1/0/3, total = 6
 			// after reversing, it's 4/5/6/3
-			// so scores = 40/6, 50/6, 60/6, 30/6
+			// so scores = 400/6, 500/6, 600/6, 300/6
 			name: "one constraint on node, all 4 nodes are candidates",
 			pod: st.MakePod().Name("p").Label("foo", "").
 				SpreadConstraint(1, "node", softSpread, st.MakeLabelSelector().Exists("foo").Obj()).
@@ -188,16 +188,16 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 			},
 			failedNodes: []*v1.Node{},
 			want: []framework.NodeScore{
-				{Name: "node-a", Score: 6},
-				{Name: "node-b", Score: 8},
-				{Name: "node-c", Score: 10},
-				{Name: "node-d", Score: 5},
+				{Name: "node-a", Score: 66},
+				{Name: "node-b", Score: 83},
+				{Name: "node-c", Score: 100},
+				{Name: "node-d", Score: 50},
 			},
 		},
 		{
 			// matching pods spread as 4/2/1/~3~, total = 4+2+1 = 7 (as node4 is not a candidate)
 			// after reversing, it's 3/5/6
-			// so scores = 30/6, 50/6, 60/6
+			// so scores = 300/6, 500/6, 600/6
 			name: "one constraint on node, 3 out of 4 nodes are candidates",
 			pod: st.MakePod().Name("p").Label("foo", "").
 				SpreadConstraint(1, "node", softSpread, st.MakeLabelSelector().Exists("foo").Obj()).
@@ -223,15 +223,15 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 				st.MakeNode().Name("node-y").Label("node", "node-y").Obj(),
 			},
 			want: []framework.NodeScore{
-				{Name: "node-a", Score: 5},
-				{Name: "node-b", Score: 8},
-				{Name: "node-x", Score: 10},
+				{Name: "node-a", Score: 50},
+				{Name: "node-b", Score: 83},
+				{Name: "node-x", Score: 100},
 			},
 		},
 		{
 			// matching pods spread as 4/?2?/1/~3~, total = 4+?+1 = 5 (as node2 is problematic)
 			// after reversing, it's 1/?/4
-			// so scores = 10/4, 0, 40/4
+			// so scores = 100/4, 0, 400/4
 			name: "one constraint on node, 3 out of 4 nodes are candidates",
 			pod: st.MakePod().Name("p").Label("foo", "").
 				SpreadConstraint(1, "node", softSpread, st.MakeLabelSelector().Exists("foo").Obj()).
@@ -257,15 +257,15 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 				st.MakeNode().Name("node-y").Label("node", "node-y").Obj(),
 			},
 			want: []framework.NodeScore{
-				{Name: "node-a", Score: 2},
+				{Name: "node-a", Score: 25},
 				{Name: "node-b", Score: 0},
-				{Name: "node-x", Score: 10},
+				{Name: "node-x", Score: 100},
 			},
 		},
 		{
 			// matching pods spread as 4/2/1/~3~, total = 6+6+4 = 16 (as topologyKey is zone instead of node)
 			// after reversing, it's 10/10/12
-			// so scores = 100/12, 100/12, 120/12
+			// so scores = 1000/12, 1000/12, 1200/12
 			name: "one constraint on zone, 3 out of 4 nodes are candidates",
 			pod: st.MakePod().Name("p").Label("foo", "").
 				SpreadConstraint(1, "zone", softSpread, st.MakeLabelSelector().Exists("foo").Obj()).
@@ -291,15 +291,15 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 				st.MakeNode().Name("node-y").Label("zone", "zone2").Label("node", "node-y").Obj(),
 			},
 			want: []framework.NodeScore{
-				{Name: "node-a", Score: 8},
-				{Name: "node-b", Score: 8},
-				{Name: "node-x", Score: 10},
+				{Name: "node-a", Score: 83},
+				{Name: "node-b", Score: 83},
+				{Name: "node-x", Score: 100},
 			},
 		},
 		{
 			// matching pods spread as 2/~1~/2/~4~, total = 2+3 + 2+6 = 13 (zone and node should be both summed up)
 			// after reversing, it's 8/5
-			// so scores = 80/8, 50/8
+			// so scores = 800/8, 500/8
 			name: "two constraints on zone and node, 2 out of 4 nodes are candidates",
 			pod: st.MakePod().Name("p").Label("foo", "").
 				SpreadConstraint(1, "zone", softSpread, st.MakeLabelSelector().Exists("foo").Obj()).
@@ -325,8 +325,8 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 				st.MakeNode().Name("node-y").Label("zone", "zone2").Label("node", "node-y").Obj(),
 			},
 			want: []framework.NodeScore{
-				{Name: "node-a", Score: 10},
-				{Name: "node-x", Score: 6},
+				{Name: "node-a", Score: 100},
+				{Name: "node-x", Score: 62},
 			},
 		},
 		{
@@ -342,7 +342,7 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 			// For the second constraint (node): the matching pods spread as 0/1/0/1
 			// sum them up gets: 2/3/1/2, and total number is 8.
 			// after reversing, it's 6/5/7/6
-			// so scores = 60/7, 50/7, 70/7, 60/7
+			// so scores = 600/7, 500/7, 700/7, 600/7
 			name: "two constraints on zone and node, with different labelSelectors",
 			pod: st.MakePod().Name("p").Label("foo", "").Label("bar", "").
 				SpreadConstraint(1, "zone", softSpread, st.MakeLabelSelector().Exists("foo").Obj()).
@@ -362,10 +362,10 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 			},
 			failedNodes: []*v1.Node{},
 			want: []framework.NodeScore{
-				{Name: "node-a", Score: 8},
-				{Name: "node-b", Score: 7},
-				{Name: "node-x", Score: 10},
-				{Name: "node-y", Score: 8},
+				{Name: "node-a", Score: 85},
+				{Name: "node-b", Score: 71},
+				{Name: "node-x", Score: 100},
+				{Name: "node-y", Score: 85},
 			},
 		},
 		{
@@ -373,7 +373,7 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 			// For the second constraint (node): the matching pods spread as 0/1/0/1
 			// sum them up gets: 0/1/2/3, and total number is 6.
 			// after reversing, it's 6/5/4/3.
-			// so scores = 60/6, 50/6, 40/6, 30/6
+			// so scores = 600/6, 500/6, 400/6, 300/6
 			name: "two constraints on zone and node, with different labelSelectors, some nodes have 0 pods",
 			pod: st.MakePod().Name("p").Label("foo", "").Label("bar", "").
 				SpreadConstraint(1, "zone", softSpread, st.MakeLabelSelector().Exists("foo").Obj()).
@@ -392,10 +392,10 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 			},
 			failedNodes: []*v1.Node{},
 			want: []framework.NodeScore{
-				{Name: "node-a", Score: 10},
-				{Name: "node-b", Score: 8},
-				{Name: "node-x", Score: 6},
-				{Name: "node-y", Score: 5},
+				{Name: "node-a", Score: 100},
+				{Name: "node-b", Score: 83},
+				{Name: "node-x", Score: 66},
+				{Name: "node-y", Score: 50},
 			},
 		},
 		{
@@ -403,7 +403,7 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 			// For the second constraint (node): the matching pods spread as 0/1/0/~1~
 			// sum them up gets: 2/3/1, and total number is 6.
 			// after reversing, it's 4/3/5
-			// so scores = 40/5, 30/5, 50/5
+			// so scores = 400/5, 300/5, 500/5
 			name: "two constraints on zone and node, with different labelSelectors, 3 out of 4 nodes are candidates",
 			pod: st.MakePod().Name("p").Label("foo", "").Label("bar", "").
 				SpreadConstraint(1, "zone", softSpread, st.MakeLabelSelector().Exists("foo").Obj()).
@@ -424,9 +424,9 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 				st.MakeNode().Name("node-y").Label("zone", "zone2").Label("node", "node-y").Obj(),
 			},
 			want: []framework.NodeScore{
-				{Name: "node-a", Score: 8},
-				{Name: "node-b", Score: 6},
-				{Name: "node-x", Score: 10},
+				{Name: "node-a", Score: 80},
+				{Name: "node-b", Score: 60},
+				{Name: "node-x", Score: 100},
 			},
 		},
 	}
@@ -434,11 +434,24 @@ func TestCalculateEvenPodsSpreadPriority(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			allNodes := append([]*v1.Node{}, tt.nodes...)
 			allNodes = append(allNodes, tt.failedNodes...)
-			nodeNameToInfo := schedulernodeinfo.CreateNodeNameToInfoMap(tt.existingPods, allNodes)
+			snapshot := nodeinfosnapshot.NewSnapshot(tt.existingPods, allNodes)
 
-			got, _ := CalculateEvenPodsSpreadPriority(tt.pod, nodeNameToInfo, tt.nodes)
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("CalculateEvenPodsSpreadPriority() = %#v, want %#v", got, tt.want)
+			meta := &priorityMetadata{
+				podTopologySpreadMap: buildPodTopologySpreadMap(tt.pod, tt.nodes, snapshot.NodeInfoList),
+			}
+			var gotList framework.NodeScoreList
+			for _, n := range tt.nodes {
+				nodeName := n.Name
+				nodeScore, err := CalculateEvenPodsSpreadPriorityMap(tt.pod, meta, snapshot.NodeInfoMap[nodeName])
+				if err != nil {
+					t.Error(err)
+				}
+				gotList = append(gotList, nodeScore)
+			}
+
+			CalculateEvenPodsSpreadPriorityReduce(tt.pod, meta, snapshot, gotList)
+			if !reflect.DeepEqual(gotList, tt.want) {
+				t.Errorf("CalculateEvenPodsSpreadPriorityReduce() = %#v, want %#v", gotList, tt.want)
 			}
 		})
 	}
@@ -455,7 +468,7 @@ func BenchmarkTestCalculateEvenPodsSpreadPriority(b *testing.B) {
 		{
 			name: "1000nodes/single-constraint-zone",
 			pod: st.MakePod().Name("p").Label("foo", "").
-				SpreadConstraint(1, "zone", softSpread, st.MakeLabelSelector().Exists("foo").Obj()).
+				SpreadConstraint(1, v1.LabelZoneFailureDomain, softSpread, st.MakeLabelSelector().Exists("foo").Obj()).
 				Obj(),
 			existingPodsNum:  10000,
 			allNodesNum:      1000,
@@ -464,7 +477,7 @@ func BenchmarkTestCalculateEvenPodsSpreadPriority(b *testing.B) {
 		{
 			name: "1000nodes/single-constraint-node",
 			pod: st.MakePod().Name("p").Label("foo", "").
-				SpreadConstraint(1, "node", softSpread, st.MakeLabelSelector().Exists("foo").Obj()).
+				SpreadConstraint(1, v1.LabelHostname, softSpread, st.MakeLabelSelector().Exists("foo").Obj()).
 				Obj(),
 			existingPodsNum:  10000,
 			allNodesNum:      1000,
@@ -473,8 +486,8 @@ func BenchmarkTestCalculateEvenPodsSpreadPriority(b *testing.B) {
 		{
 			name: "1000nodes/two-constraints-zone-node",
 			pod: st.MakePod().Name("p").Label("foo", "").Label("bar", "").
-				SpreadConstraint(1, "zone", softSpread, st.MakeLabelSelector().Exists("foo").Obj()).
-				SpreadConstraint(1, "node", softSpread, st.MakeLabelSelector().Exists("bar").Obj()).
+				SpreadConstraint(1, v1.LabelZoneFailureDomain, softSpread, st.MakeLabelSelector().Exists("foo").Obj()).
+				SpreadConstraint(1, v1.LabelHostname, softSpread, st.MakeLabelSelector().Exists("bar").Obj()).
 				Obj(),
 			existingPodsNum:  10000,
 			allNodesNum:      1000,
@@ -483,11 +496,21 @@ func BenchmarkTestCalculateEvenPodsSpreadPriority(b *testing.B) {
 	}
 	for _, tt := range tests {
 		b.Run(tt.name, func(b *testing.B) {
-			existingPods, allNodes, filteredNodes := st.MakeNodesAndPodsForEvenPodsSpread(tt.pod, tt.existingPodsNum, tt.allNodesNum, tt.filteredNodesNum)
-			nodeNameToInfo := schedulernodeinfo.CreateNodeNameToInfoMap(existingPods, allNodes)
+			existingPods, allNodes, filteredNodes := st.MakeNodesAndPodsForEvenPodsSpread(tt.pod.Labels, tt.existingPodsNum, tt.allNodesNum, tt.filteredNodesNum)
+			snapshot := nodeinfosnapshot.NewSnapshot(existingPods, allNodes)
+			meta := &priorityMetadata{
+				podTopologySpreadMap: buildPodTopologySpreadMap(tt.pod, filteredNodes, snapshot.NodeInfoList),
+			}
 			b.ResetTimer()
+
 			for i := 0; i < b.N; i++ {
-				CalculateEvenPodsSpreadPriority(tt.pod, nodeNameToInfo, filteredNodes)
+				var gotList framework.NodeScoreList
+				for _, n := range filteredNodes {
+					nodeName := n.Name
+					nodeScore, _ := CalculateEvenPodsSpreadPriorityMap(tt.pod, meta, snapshot.NodeInfoMap[nodeName])
+					gotList = append(gotList, nodeScore)
+				}
+				CalculateEvenPodsSpreadPriorityReduce(tt.pod, meta, snapshot, gotList)
 			}
 		})
 	}

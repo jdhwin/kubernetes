@@ -124,7 +124,7 @@ var _ = framework.KubeDescribe("Security Context", func() {
 			framework.SkipIfNodeOSDistroIs("windows")
 			name := "explicit-nonroot-uid"
 			pod := makeNonRootPod(name, rootImage, pointer.Int64Ptr(1234))
-			pod = podClient.Create(pod)
+			podClient.Create(pod)
 
 			podClient.WaitForSuccess(name, framework.PodStartTimeout)
 			framework.ExpectNoError(podClient.MatchContainerOutput(name, name, "1234"))
@@ -144,7 +144,7 @@ var _ = framework.KubeDescribe("Security Context", func() {
 		ginkgo.It("should run with an image specified user ID", func() {
 			name := "implicit-nonroot-uid"
 			pod := makeNonRootPod(name, nonRootImage, nil)
-			pod = podClient.Create(pod)
+			podClient.Create(pod)
 
 			podClient.WaitForSuccess(name, framework.PodStartTimeout)
 			framework.ExpectNoError(podClient.MatchContainerOutput(name, name, "1234"))
@@ -269,6 +269,19 @@ var _ = framework.KubeDescribe("Security Context", func() {
 			framework.Logf("Got logs for pod %q: %q", podName, logs)
 			if !strings.Contains(logs, "Operation not permitted") {
 				framework.Failf("unprivileged container shouldn't be able to create dummy device")
+			}
+		})
+
+		ginkgo.It("should run the container as privileged when true [LinuxOnly] [NodeFeature:HostAccess]", func() {
+			podName := createAndWaitUserPod(true)
+			logs, err := e2epod.GetPodLogs(f.ClientSet, f.Namespace.Name, podName, podName)
+			if err != nil {
+				framework.Failf("GetPodLogs for pod %q failed: %v", podName, err)
+			}
+
+			framework.Logf("Got logs for pod %q: %q", podName, logs)
+			if strings.Contains(logs, "Operation not permitted") {
+				framework.Failf("privileged container should be able to create dummy device")
 			}
 		})
 	})

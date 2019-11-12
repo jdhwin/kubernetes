@@ -32,6 +32,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
@@ -111,6 +112,36 @@ func isSudoPresent(nodeIP string, provider string) bool {
 	return false
 }
 
+// getHostAddress gets the node for a pod and returns the first
+// address. Returns an error if the node the pod is on doesn't have an
+// address.
+func getHostAddress(client clientset.Interface, p *v1.Pod) (string, error) {
+	node, err := client.CoreV1().Nodes().Get(p.Spec.NodeName, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	// Try externalAddress first
+	for _, address := range node.Status.Addresses {
+		if address.Type == v1.NodeExternalIP {
+			if address.Address != "" {
+				return address.Address, nil
+			}
+		}
+	}
+	// If no externalAddress found, try internalAddress
+	for _, address := range node.Status.Addresses {
+		if address.Type == v1.NodeInternalIP {
+			if address.Address != "" {
+				return address.Address, nil
+			}
+		}
+	}
+
+	// If not found, return error
+	return "", fmt.Errorf("No address for pod %v on node %v",
+		p.Name, p.Spec.NodeName)
+}
+
 // KubeletCommand performs `start`, `restart`, or `stop` on the kubelet running on the node of the target pod and waits
 // for the desired statues..
 // - First issues the command via `systemctl`
@@ -122,7 +153,7 @@ func KubeletCommand(kOp KubeletOpt, c clientset.Interface, pod *v1.Pod) {
 	systemctlPresent := false
 	kubeletPid := ""
 
-	nodeIP, err := framework.GetHostAddress(c, pod)
+	nodeIP, err := getHostAddress(c, pod)
 	framework.ExpectNoError(err)
 	nodeIP = nodeIP + ":22"
 
@@ -236,8 +267,9 @@ func TestKubeletRestartsAndRestoresMap(c clientset.Interface, f *framework.Frame
 
 // TestVolumeUnmountsFromDeletedPodWithForceOption tests that a volume unmounts if the client pod was deleted while the kubelet was down.
 // forceDelete is true indicating whether the pod is forcefully deleted.
+// checkSubpath is true indicating whether the subpath should be checked.
 func TestVolumeUnmountsFromDeletedPodWithForceOption(c clientset.Interface, f *framework.Framework, clientPod *v1.Pod, forceDelete bool, checkSubpath bool) {
-	nodeIP, err := framework.GetHostAddress(c, clientPod)
+	nodeIP, err := getHostAddress(c, clientPod)
 	framework.ExpectNoError(err)
 	nodeIP = nodeIP + ":22"
 
@@ -313,23 +345,33 @@ func TestVolumeUnmountsFromForceDeletedPod(c clientset.Interface, f *framework.F
 // TestVolumeUnmapsFromDeletedPodWithForceOption tests that a volume unmaps if the client pod was deleted while the kubelet was down.
 // forceDelete is true indicating whether the pod is forcefully deleted.
 func TestVolumeUnmapsFromDeletedPodWithForceOption(c clientset.Interface, f *framework.Framework, clientPod *v1.Pod, forceDelete bool) {
-	nodeIP, err := framework.GetHostAddress(c, clientPod)
+	nodeIP, err := getHostAddress(c, clientPod)
 	framework.ExpectNoError(err, "Failed to get nodeIP.")
 	nodeIP = nodeIP + ":22"
 
 	// Creating command to check whether path exists
-	command := fmt.Sprintf("ls /var/lib/kubelet/pods/%s/volumeDevices/*/ | grep '.'", clientPod.UID)
+	podDirectoryCmd := fmt.Sprintf("ls /var/lib/kubelet/pods/%s/volumeDevices/*/ | grep '.'", clientPod.UID)
 	if isSudoPresent(nodeIP, framework.TestContext.Provider) {
-		command = fmt.Sprintf("sudo sh -c \"%s\"", command)
+		podDirectoryCmd = fmt.Sprintf("sudo sh -c \"%s\"", podDirectoryCmd)
+	}
+	// Directories in the global directory have unpredictable names, however, device symlinks
+	// have the same name as pod.UID. So just find anything with pod.UID name.
+	globalBlockDirectoryCmd := fmt.Sprintf("find /var/lib/kubelet/plugins -name %s", clientPod.UID)
+	if isSudoPresent(nodeIP, framework.TestContext.Provider) {
+		globalBlockDirectoryCmd = fmt.Sprintf("sudo sh -c \"%s\"", globalBlockDirectoryCmd)
 	}
 
 	ginkgo.By("Expecting the symlinks from PodDeviceMapPath to be found.")
-	result, err := e2essh.SSH(command, nodeIP, framework.TestContext.Provider)
+	result, err := e2essh.SSH(podDirectoryCmd, nodeIP, framework.TestContext.Provider)
 	e2essh.LogResult(result)
 	framework.ExpectNoError(err, "Encountered SSH error.")
 	framework.ExpectEqual(result.Code, 0, fmt.Sprintf("Expected grep exit code of 0, got %d", result.Code))
 
-	// TODO: Needs to check GetGlobalMapPath and descriptor lock, as well.
+	ginkgo.By("Expecting the symlinks from global map path to be found.")
+	result, err = e2essh.SSH(globalBlockDirectoryCmd, nodeIP, framework.TestContext.Provider)
+	e2essh.LogResult(result)
+	framework.ExpectNoError(err, "Encountered SSH error.")
+	framework.ExpectEqual(result.Code, 0, fmt.Sprintf("Expected find exit code of 0, got %d", result.Code))
 
 	// This command is to make sure kubelet is started after test finishes no matter it fails or not.
 	defer func() {
@@ -358,12 +400,16 @@ func TestVolumeUnmapsFromDeletedPodWithForceOption(c clientset.Interface, f *fra
 	}
 
 	ginkgo.By("Expecting the symlink from PodDeviceMapPath not to be found.")
-	result, err = e2essh.SSH(command, nodeIP, framework.TestContext.Provider)
+	result, err = e2essh.SSH(podDirectoryCmd, nodeIP, framework.TestContext.Provider)
 	e2essh.LogResult(result)
 	framework.ExpectNoError(err, "Encountered SSH error.")
 	gomega.Expect(result.Stdout).To(gomega.BeEmpty(), "Expected grep stdout to be empty.")
 
-	// TODO: Needs to check GetGlobalMapPath and descriptor lock, as well.
+	ginkgo.By("Expecting the symlinks from global map path not to be found.")
+	result, err = e2essh.SSH(globalBlockDirectoryCmd, nodeIP, framework.TestContext.Provider)
+	e2essh.LogResult(result)
+	framework.ExpectNoError(err, "Encountered SSH error.")
+	gomega.Expect(result.Stdout).To(gomega.BeEmpty(), "Expected find stdout to be empty.")
 
 	framework.Logf("Volume unmaped on node %s", clientPod.Spec.NodeName)
 }
@@ -632,4 +678,25 @@ func CheckWriteToPath(pod *v1.Pod, volMode v1.PersistentVolumeMode, path string,
 
 	VerifyExecInPodSucceed(pod, fmt.Sprintf("echo %s | base64 -d | sha256sum", encoded))
 	VerifyExecInPodSucceed(pod, fmt.Sprintf("echo %s | base64 -d | dd of=%s bs=%d count=1", encoded, pathForVolMode, len))
+}
+
+// findMountPoints returns all mount points on given node under specified directory.
+func findMountPoints(hostExec HostExec, node *v1.Node, dir string) []string {
+	result, err := hostExec.IssueCommandWithResult(fmt.Sprintf(`find %s -type d -exec mountpoint {} \; | grep 'is a mountpoint$' || true`, dir), node)
+	framework.ExpectNoError(err, "Encountered HostExec error.")
+	var mountPoints []string
+	if err != nil {
+		for _, line := range strings.Split(result, "\n") {
+			if line == "" {
+				continue
+			}
+			mountPoints = append(mountPoints, strings.TrimSuffix(line, " is a mountpoint"))
+		}
+	}
+	return mountPoints
+}
+
+// FindVolumeGlobalMountPoints returns all volume global mount points on the node of given pod.
+func FindVolumeGlobalMountPoints(hostExec HostExec, node *v1.Node) sets.String {
+	return sets.NewString(findMountPoints(hostExec, node, "/var/lib/kubelet/plugins")...)
 }

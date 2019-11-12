@@ -140,9 +140,8 @@ func TestSyncServiceMissing(t *testing.T) {
 
 	err := esController.syncService(fmt.Sprintf("%s/%s", namespace, missingServiceName))
 
-	// Since the service doesn't exist, we should get a not found error
-	assert.NotNil(t, err, "Expected no error syncing service")
-	assert.Equal(t, err.Error(), "service \"notthere\" not found")
+	// nil should be returned when the service doesn't exist
+	assert.Nil(t, err, "Expected no error syncing service")
 
 	// That should mean no client actions were performed
 	assert.Len(t, client.Actions(), 0)
@@ -268,7 +267,7 @@ func TestSyncServiceFull(t *testing.T) {
 	slice := sliceList.Items[0]
 	assert.Len(t, slice.Endpoints, 2, "Expected 2 endpoints in first slice")
 	assert.Equal(t, slice.Annotations["endpoints.kubernetes.io/last-change-trigger-time"], serviceCreateTime.Format(time.RFC3339Nano))
-	assert.EqualValues(t, []discovery.EndpointPort{{
+	assert.ElementsMatch(t, []discovery.EndpointPort{{
 		Name:     strPtr("tcp-example"),
 		Protocol: protoPtr(v1.ProtocolTCP),
 		Port:     int32Ptr(int32(80)),
@@ -281,6 +280,7 @@ func TestSyncServiceFull(t *testing.T) {
 		Protocol: protoPtr(v1.ProtocolSCTP),
 		Port:     int32Ptr(int32(3456)),
 	}}, slice.Ports)
+
 	assert.ElementsMatch(t, []discovery.Endpoint{{
 		Conditions: discovery.EndpointConditions{Ready: utilpointer.BoolPtr(true)},
 		Addresses:  []string{"1.2.3.4"},

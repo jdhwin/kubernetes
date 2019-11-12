@@ -206,7 +206,7 @@ type PersistentVolumeController struct {
 
 	// operationTimestamps caches start timestamp of operations
 	// (currently provision + binding/deletion) for metric recording.
-	// Detailed lifecyle/key for each operation
+	// Detailed lifecycle/key for each operation
 	// 1. provision + binding
 	//     key:        claimKey
 	//     start time: user has NOT provide any volume ref in the claim AND
@@ -268,11 +268,7 @@ func checkVolumeSatisfyClaim(volume *v1.PersistentVolume, claim *v1.PersistentVo
 		return fmt.Errorf("storageClassName does not match")
 	}
 
-	isMismatch, err := pvutil.CheckVolumeModeMismatches(&claim.Spec, &volume.Spec)
-	if err != nil {
-		return fmt.Errorf("error checking volumeMode: %v", err)
-	}
-	if isMismatch {
+	if pvutil.CheckVolumeModeMismatches(&claim.Spec, &volume.Spec) {
 		return fmt.Errorf("incompatible volumeMode")
 	}
 
@@ -589,7 +585,7 @@ func (ctrl *PersistentVolumeController) syncVolume(volume *v1.PersistentVolume) 
 			}
 			return nil
 		} else if claim.Spec.VolumeName == "" {
-			if isMismatch, err := pvutil.CheckVolumeModeMismatches(&claim.Spec, &volume.Spec); err != nil || isMismatch {
+			if pvutil.CheckVolumeModeMismatches(&claim.Spec, &volume.Spec) {
 				// Binding for the volume won't be called in syncUnboundClaim,
 				// because findBestMatchForClaim won't return the volume due to volumeMode mismatch.
 				volumeMsg := fmt.Sprintf("Cannot bind PersistentVolume to requested PersistentVolumeClaim %q due to incompatible volumeMode.", claim.Name)
@@ -1075,7 +1071,7 @@ func (ctrl *PersistentVolumeController) recycleVolumeOperation(volume *v1.Persis
 	}
 
 	// Verify the claim is in cache: if so, then it is a different PVC with the same name
-	// since the volume is known to be released at this moment. Ths new (cached) PVC must use
+	// since the volume is known to be released at this moment. The new (cached) PVC must use
 	// a different PV -- we checked that the PV is unused in isVolumeReleased.
 	// So the old PV is safe to be recycled.
 	claimName := claimrefToClaimKey(volume.Spec.ClaimRef)

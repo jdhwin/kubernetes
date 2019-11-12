@@ -23,7 +23,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
-	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
+	nodeinfosnapshot "k8s.io/kubernetes/pkg/scheduler/nodeinfo/snapshot"
 )
 
 func TestNodeAffinityPriority(t *testing.T) {
@@ -160,16 +160,15 @@ func TestNodeAffinityPriority(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine5", Labels: label5}},
 				{ObjectMeta: metav1.ObjectMeta{Name: "machine2", Labels: label2}},
 			},
-			expectedList: []framework.NodeScore{{Name: "machine1", Score: 1}, {Name: "machine5", Score: framework.MaxNodeScore}, {Name: "machine2", Score: 3}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 18}, {Name: "machine5", Score: framework.MaxNodeScore}, {Name: "machine2", Score: 36}},
 			name:         "all machines matches the preferred scheduling requirements of pod but with different priorities ",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			nodeNameToInfo := schedulernodeinfo.CreateNodeNameToInfoMap(nil, test.nodes)
-			nap := priorityFunction(CalculateNodeAffinityPriorityMap, CalculateNodeAffinityPriorityReduce, nil)
-			list, err := nap(test.pod, nodeNameToInfo, test.nodes)
+			snapshot := nodeinfosnapshot.NewSnapshot(nil, test.nodes)
+			list, err := runMapReducePriority(CalculateNodeAffinityPriorityMap, CalculateNodeAffinityPriorityReduce, nil, test.pod, snapshot, test.nodes)
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}

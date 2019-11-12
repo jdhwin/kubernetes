@@ -20,25 +20,35 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/kubernetes/pkg/scheduler/algorithm"
+	appslisters "k8s.io/client-go/listers/apps/v1"
+	corelisters "k8s.io/client-go/listers/core/v1"
+	schedulerlisters "k8s.io/kubernetes/pkg/scheduler/listers"
 	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
 )
 
-// PriorityMetadataFactory is a factory to produce PriorityMetadata.
-type PriorityMetadataFactory struct {
-	serviceLister     algorithm.ServiceLister
-	controllerLister  algorithm.ControllerLister
-	replicaSetLister  algorithm.ReplicaSetLister
-	statefulSetLister algorithm.StatefulSetLister
+// MetadataFactory is a factory to produce PriorityMetadata.
+type MetadataFactory struct {
+	serviceLister         corelisters.ServiceLister
+	controllerLister      corelisters.ReplicationControllerLister
+	replicaSetLister      appslisters.ReplicaSetLister
+	statefulSetLister     appslisters.StatefulSetLister
+	hardPodAffinityWeight int32
 }
 
-// NewPriorityMetadataFactory creates a PriorityMetadataFactory.
-func NewPriorityMetadataFactory(serviceLister algorithm.ServiceLister, controllerLister algorithm.ControllerLister, replicaSetLister algorithm.ReplicaSetLister, statefulSetLister algorithm.StatefulSetLister) PriorityMetadataProducer {
-	factory := &PriorityMetadataFactory{
-		serviceLister:     serviceLister,
-		controllerLister:  controllerLister,
-		replicaSetLister:  replicaSetLister,
-		statefulSetLister: statefulSetLister,
+// NewMetadataFactory creates a MetadataFactory.
+func NewMetadataFactory(
+	serviceLister corelisters.ServiceLister,
+	controllerLister corelisters.ReplicationControllerLister,
+	replicaSetLister appslisters.ReplicaSetLister,
+	statefulSetLister appslisters.StatefulSetLister,
+	hardPodAffinityWeight int32,
+) MetadataProducer {
+	factory := &MetadataFactory{
+		serviceLister:         serviceLister,
+		controllerLister:      controllerLister,
+		replicaSetLister:      replicaSetLister,
+		statefulSetLister:     statefulSetLister,
+		hardPodAffinityWeight: hardPodAffinityWeight,
 	}
 	return factory.PriorityMetadata
 }
@@ -52,13 +62,27 @@ type priorityMetadata struct {
 	controllerRef           *metav1.OwnerReference
 	podFirstServiceSelector labels.Selector
 	totalNumNodes           int
+	podTopologySpreadMap    *podTopologySpreadMap
+	topologyScore           topologyPairToScore
 }
 
-// PriorityMetadata is a PriorityMetadataProducer.  Node info can be nil.
-func (pmf *PriorityMetadataFactory) PriorityMetadata(pod *v1.Pod, nodeNameToInfo map[string]*schedulernodeinfo.NodeInfo) interface{} {
+// PriorityMetadata is a MetadataProducer.  Node info can be nil.
+func (pmf *MetadataFactory) PriorityMetadata(
+	pod *v1.Pod,
+	filteredNodes []*v1.Node,
+	sharedLister schedulerlisters.SharedLister,
+) interface{} {
 	// If we cannot compute metadata, just return nil
 	if pod == nil {
 		return nil
+	}
+	totalNumNodes := 0
+	var allNodes []*schedulernodeinfo.NodeInfo
+	if sharedLister != nil {
+		if l, err := sharedLister.NodeInfos().List(); err == nil {
+			totalNumNodes = len(l)
+			allNodes = l
+		}
 	}
 	return &priorityMetadata{
 		podLimits:               getResourceLimits(pod),
@@ -67,12 +91,14 @@ func (pmf *PriorityMetadataFactory) PriorityMetadata(pod *v1.Pod, nodeNameToInfo
 		podSelectors:            getSelectors(pod, pmf.serviceLister, pmf.controllerLister, pmf.replicaSetLister, pmf.statefulSetLister),
 		controllerRef:           metav1.GetControllerOf(pod),
 		podFirstServiceSelector: getFirstServiceSelector(pod, pmf.serviceLister),
-		totalNumNodes:           len(nodeNameToInfo),
+		totalNumNodes:           totalNumNodes,
+		podTopologySpreadMap:    buildPodTopologySpreadMap(pod, filteredNodes, allNodes),
+		topologyScore:           buildTopologyPairToScore(pod, sharedLister, filteredNodes, pmf.hardPodAffinityWeight),
 	}
 }
 
 // getFirstServiceSelector returns one selector of services the given pod.
-func getFirstServiceSelector(pod *v1.Pod, sl algorithm.ServiceLister) (firstServiceSelector labels.Selector) {
+func getFirstServiceSelector(pod *v1.Pod, sl corelisters.ServiceLister) (firstServiceSelector labels.Selector) {
 	if services, err := sl.GetPodServices(pod); err == nil && len(services) > 0 {
 		return labels.SelectorFromSet(services[0].Spec.Selector)
 	}
@@ -80,7 +106,7 @@ func getFirstServiceSelector(pod *v1.Pod, sl algorithm.ServiceLister) (firstServ
 }
 
 // getSelectors returns selectors of services, RCs and RSs matching the given pod.
-func getSelectors(pod *v1.Pod, sl algorithm.ServiceLister, cl algorithm.ControllerLister, rsl algorithm.ReplicaSetLister, ssl algorithm.StatefulSetLister) []labels.Selector {
+func getSelectors(pod *v1.Pod, sl corelisters.ServiceLister, cl corelisters.ReplicationControllerLister, rsl appslisters.ReplicaSetLister, ssl appslisters.StatefulSetLister) []labels.Selector {
 	var selectors []labels.Selector
 
 	if services, err := sl.GetPodServices(pod); err == nil {

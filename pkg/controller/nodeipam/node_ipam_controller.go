@@ -33,8 +33,8 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	cloudprovider "k8s.io/cloud-provider"
+	"k8s.io/component-base/metrics/prometheus/ratelimiter"
 	"k8s.io/kubernetes/pkg/controller/nodeipam/ipam"
-	"k8s.io/kubernetes/pkg/util/metrics"
 )
 
 const (
@@ -98,7 +98,7 @@ func NewNodeIpamController(
 		})
 
 	if kubeClient.CoreV1().RESTClient().GetRateLimiter() != nil {
-		metrics.RegisterMetricAndTrackRateLimiterUsage("node_ipam_controller", kubeClient.CoreV1().RESTClient().GetRateLimiter())
+		ratelimiter.RegisterMetricAndTrackRateLimiterUsage("node_ipam_controller", kubeClient.CoreV1().RESTClient().GetRateLimiter())
 	}
 
 	// Cloud CIDR allocator does not rely on clusterCIDR or nodeCIDRMaskSize for allocation.
@@ -111,11 +111,11 @@ func NewNodeIpamController(
 		// - modify mask to allow flexible masks for IPv4 and IPv6
 		// - for alpha status they are the same
 
-		// for each cidr, node mask size must be < cidr mask
+		// for each cidr, cidr mask size must be <= node mask
 		for _, cidr := range clusterCIDRs {
 			mask := cidr.Mask
 			if maskSize, _ := mask.Size(); maskSize > nodeCIDRMaskSize {
-				klog.Fatal("Controller: Invalid --cluster-cidr, mask size of cluster CIDR must be less than --node-cidr-mask-size")
+				klog.Fatal("Controller: Invalid --cluster-cidr, mask size of cluster CIDR must be less than or equal to --node-cidr-mask-size")
 			}
 		}
 	}

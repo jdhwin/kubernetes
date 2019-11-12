@@ -20,13 +20,13 @@ import (
 	"reflect"
 	"testing"
 
-	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/informers"
+	clientsetfake "k8s.io/client-go/kubernetes/fake"
 	priorityutil "k8s.io/kubernetes/pkg/scheduler/algorithm/priorities/util"
 	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
-	schedulertesting "k8s.io/kubernetes/pkg/scheduler/testing"
 )
 
 func TestPriorityMetadata(t *testing.T) {
@@ -162,14 +162,19 @@ func TestPriorityMetadata(t *testing.T) {
 			name: "Produce a priorityMetadata with specified requests",
 		},
 	}
-	metaDataProducer := NewPriorityMetadataFactory(
-		schedulertesting.FakeServiceLister([]*v1.Service{}),
-		schedulertesting.FakeControllerLister([]*v1.ReplicationController{}),
-		schedulertesting.FakeReplicaSetLister([]*apps.ReplicaSet{}),
-		schedulertesting.FakeStatefulSetLister([]*apps.StatefulSet{}))
+	client := clientsetfake.NewSimpleClientset()
+	informerFactory := informers.NewSharedInformerFactory(client, 0)
+
+	metaDataProducer := NewMetadataFactory(
+		informerFactory.Core().V1().Services().Lister(),
+		informerFactory.Core().V1().ReplicationControllers().Lister(),
+		informerFactory.Apps().V1().ReplicaSets().Lister(),
+		informerFactory.Apps().V1().StatefulSets().Lister(),
+		1,
+	)
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ptData := metaDataProducer(test.pod, nil)
+			ptData := metaDataProducer(test.pod, nil, nil)
 			if !reflect.DeepEqual(test.expected, ptData) {
 				t.Errorf("expected %#v, got %#v", test.expected, ptData)
 			}

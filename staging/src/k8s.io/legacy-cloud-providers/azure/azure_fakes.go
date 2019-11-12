@@ -942,7 +942,7 @@ func (f *fakeVMSet) EnsureBackendPoolDeleted(service *v1.Service, backendPoolID,
 	return fmt.Errorf("unimplemented")
 }
 
-func (f *fakeVMSet) AttachDisk(isManagedDisk bool, diskName, diskURI string, nodeName types.NodeName, lun int32, cachingMode compute.CachingTypes) error {
+func (f *fakeVMSet) AttachDisk(isManagedDisk bool, diskName, diskURI string, nodeName types.NodeName, lun int32, cachingMode compute.CachingTypes, diskEncryptionSetID string) error {
 	return fmt.Errorf("unimplemented")
 }
 
@@ -950,7 +950,7 @@ func (f *fakeVMSet) DetachDisk(diskName, diskURI string, nodeName types.NodeName
 	return nil, fmt.Errorf("unimplemented")
 }
 
-func (f *fakeVMSet) GetDataDisks(nodeName types.NodeName) ([]compute.DataDisk, error) {
+func (f *fakeVMSet) GetDataDisks(nodeName types.NodeName, crt cacheReadType) ([]compute.DataDisk, error) {
 	return nil, fmt.Errorf("unimplemented")
 }
 

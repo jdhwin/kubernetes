@@ -39,6 +39,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	batchv1beta1 "k8s.io/api/batch/v1beta1"
 	certificatesv1beta1 "k8s.io/api/certificates/v1beta1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1alpha1 "k8s.io/api/discovery/v1alpha1"
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
@@ -474,7 +475,7 @@ func describeLimitRangeSpec(spec corev1.LimitRangeSpec, prefix string, w PrefixW
 // DescribeLimitRanges merges a set of limit range items into a single tabular description
 func DescribeLimitRanges(limitRanges *corev1.LimitRangeList, w PrefixWriter) {
 	if len(limitRanges.Items) == 0 {
-		w.Write(LEVEL_0, "No resource limits.\n")
+		w.Write(LEVEL_0, "No LimitRange resource.\n")
 		return
 	}
 	w.Write(LEVEL_0, "Resource Limits\n Type\tResource\tMin\tMax\tDefault Request\tDefault Limit\tMax Limit/Request Ratio\n")
@@ -776,10 +777,11 @@ func describePodIPs(pod *corev1.Pod, w PrefixWriter, space string) {
 }
 
 func describeVolumes(volumes []corev1.Volume, w PrefixWriter, space string) {
-	if volumes == nil || len(volumes) == 0 {
+	if len(volumes) == 0 {
 		w.Write(LEVEL_0, "%sVolumes:\t<none>\n", space)
 		return
 	}
+
 	w.Write(LEVEL_0, "%sVolumes:\n", space)
 	for _, volume := range volumes {
 		nameIndent := ""
@@ -2425,7 +2427,6 @@ func describeIngressTLS(w PrefixWriter, ingTLS []networkingv1beta1.IngressTLS) {
 			w.Write(LEVEL_1, "%v terminates %v\n", t.SecretName, strings.Join(t.Hosts, ","))
 		}
 	}
-	return
 }
 
 // TODO: Move from annotations into Ingress status.
@@ -2434,7 +2435,6 @@ func describeIngressAnnotations(w PrefixWriter, annotations map[string]string) {
 	for k, v := range annotations {
 		w.Write(LEVEL_1, "%v:\t%s\n", k, v)
 	}
-	return
 }
 
 // ServiceDescriber generates information about a service.
@@ -2741,8 +2741,8 @@ func (d *ServiceAccountDescriber) Describe(namespace, name string, describerSett
 
 		for _, s := range secrets.Items {
 			if s.Type == corev1.SecretTypeServiceAccountToken {
-				name, _ := s.Annotations[corev1.ServiceAccountNameKey]
-				uid, _ := s.Annotations[corev1.ServiceAccountUIDKey]
+				name := s.Annotations[corev1.ServiceAccountNameKey]
+				uid := s.Annotations[corev1.ServiceAccountUIDKey]
 				if name == serviceAccount.Name && uid == string(serviceAccount.UID) {
 					tokens = append(tokens, s)
 				}
@@ -3000,6 +3000,15 @@ func (d *NodeDescriber) Describe(namespace, name string, describerSettings descr
 		return "", err
 	}
 
+	lease, err := d.CoordinationV1().Leases(corev1.NamespaceNodeLease).Get(name, metav1.GetOptions{})
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			return "", err
+		}
+		// Corresponding Lease object doesn't exist - print it accordingly.
+		lease = nil
+	}
+
 	fieldSelector, err := fields.ParseSelector("spec.nodeName=" + name + ",status.phase!=" + string(corev1.PodSucceeded) + ",status.phase!=" + string(corev1.PodFailed))
 	if err != nil {
 		return "", err
@@ -3026,10 +3035,10 @@ func (d *NodeDescriber) Describe(namespace, name string, describerSettings descr
 		}
 	}
 
-	return describeNode(node, nodeNonTerminatedPodsList, events, canViewPods)
+	return describeNode(node, lease, nodeNonTerminatedPodsList, events, canViewPods)
 }
 
-func describeNode(node *corev1.Node, nodeNonTerminatedPodsList *corev1.PodList, events *corev1.EventList, canViewPods bool) (string, error) {
+func describeNode(node *corev1.Node, lease *coordinationv1.Lease, nodeNonTerminatedPodsList *corev1.PodList, events *corev1.EventList, canViewPods bool) (string, error) {
 	return tabbedString(func(out io.Writer) error {
 		w := NewPrefixWriter(out)
 		w.Write(LEVEL_0, "Name:\t%s\n", node.Name)
@@ -3043,6 +3052,24 @@ func describeNode(node *corev1.Node, nodeNonTerminatedPodsList *corev1.PodList, 
 		w.Write(LEVEL_0, "CreationTimestamp:\t%s\n", node.CreationTimestamp.Time.Format(time.RFC1123Z))
 		printNodeTaintsMultiline(w, "Taints", node.Spec.Taints)
 		w.Write(LEVEL_0, "Unschedulable:\t%v\n", node.Spec.Unschedulable)
+
+		w.Write(LEVEL_0, "Lease:\n")
+		holderIdentity := "<unset>"
+		if lease != nil && lease.Spec.HolderIdentity != nil {
+			holderIdentity = *lease.Spec.HolderIdentity
+		}
+		w.Write(LEVEL_1, "HolderIdentity:\t%s\n", holderIdentity)
+		acquireTime := "<unset>"
+		if lease != nil && lease.Spec.AcquireTime != nil {
+			acquireTime = lease.Spec.AcquireTime.Time.Format(time.RFC1123Z)
+		}
+		w.Write(LEVEL_1, "AcquireTime:\t%s\n", acquireTime)
+		renewTime := "<unset>"
+		if lease != nil && lease.Spec.RenewTime != nil {
+			renewTime = lease.Spec.RenewTime.Time.Format(time.RFC1123Z)
+		}
+		w.Write(LEVEL_1, "RenewTime:\t%s\n", renewTime)
+
 		if len(node.Status.Conditions) > 0 {
 			w.Write(LEVEL_0, "Conditions:\n  Type\tStatus\tLastHeartbeatTime\tLastTransitionTime\tReason\tMessage\n")
 			w.Write(LEVEL_1, "----\t------\t-----------------\t------------------\t------\t-------\n")
@@ -3233,10 +3260,15 @@ func describeCertificateSigningRequest(csr *certificatesv1beta1.CertificateSigni
 		printListHelper(w, "\t", "StreetAddress", cr.Subject.StreetAddress)
 		printListHelper(w, "\t", "PostalCode", cr.Subject.PostalCode)
 
-		if len(cr.DNSNames)+len(cr.EmailAddresses)+len(cr.IPAddresses) > 0 {
+		if len(cr.DNSNames)+len(cr.EmailAddresses)+len(cr.IPAddresses)+len(cr.URIs) > 0 {
 			w.Write(LEVEL_0, "Subject Alternative Names:\n")
 			printListHelper(w, "\t", "DNS Names", cr.DNSNames)
 			printListHelper(w, "\t", "Email Addresses", cr.EmailAddresses)
+			var uris []string
+			for _, uri := range cr.URIs {
+				uris = append(uris, uri.String())
+			}
+			printListHelper(w, "\t", "URIs", uris)
 			var ipaddrs []string
 			for _, ipaddr := range cr.IPAddresses {
 				ipaddrs = append(ipaddrs, ipaddr.String())
@@ -4291,7 +4323,7 @@ func printLabelsMultiline(w PrefixWriter, title string, labels map[string]string
 func printLabelsMultilineWithIndent(w PrefixWriter, initialIndent, title, innerIndent string, labels map[string]string, skip sets.String) {
 	w.Write(LEVEL_0, "%s%s:%s", initialIndent, title, innerIndent)
 
-	if labels == nil || len(labels) == 0 {
+	if len(labels) == 0 {
 		w.WriteLine("<none>")
 		return
 	}
@@ -4329,7 +4361,7 @@ func printNodeTaintsMultiline(w PrefixWriter, title string, taints []corev1.Tain
 func printTaintsMultilineWithIndent(w PrefixWriter, initialIndent, title, innerIndent string, taints []corev1.Taint) {
 	w.Write(LEVEL_0, "%s%s:%s", initialIndent, title, innerIndent)
 
-	if taints == nil || len(taints) == 0 {
+	if len(taints) == 0 {
 		w.WriteLine("<none>")
 		return
 	}
@@ -4360,7 +4392,7 @@ func printPodsMultiline(w PrefixWriter, title string, pods []corev1.Pod) {
 func printPodsMultilineWithIndent(w PrefixWriter, initialIndent, title, innerIndent string, pods []corev1.Pod) {
 	w.Write(LEVEL_0, "%s%s:%s", initialIndent, title, innerIndent)
 
-	if pods == nil || len(pods) == 0 {
+	if len(pods) == 0 {
 		w.WriteLine("<none>")
 		return
 	}
@@ -4391,7 +4423,7 @@ func printPodTolerationsMultiline(w PrefixWriter, title string, tolerations []co
 func printTolerationsMultilineWithIndent(w PrefixWriter, initialIndent, title, innerIndent string, tolerations []corev1.Toleration) {
 	w.Write(LEVEL_0, "%s%s:%s", initialIndent, title, innerIndent)
 
-	if tolerations == nil || len(tolerations) == 0 {
+	if len(tolerations) == 0 {
 		w.WriteLine("<none>")
 		return
 	}

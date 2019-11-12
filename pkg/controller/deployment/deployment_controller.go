@@ -45,9 +45,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/component-base/metrics/prometheus/ratelimiter"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/deployment/util"
-	"k8s.io/kubernetes/pkg/util/metrics"
 )
 
 const (
@@ -103,7 +103,7 @@ func NewDeploymentController(dInformer appsinformers.DeploymentInformer, rsInfor
 	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: client.CoreV1().Events("")})
 
 	if client != nil && client.CoreV1().RESTClient().GetRateLimiter() != nil {
-		if err := metrics.RegisterMetricAndTrackRateLimiterUsage("deployment_controller", client.CoreV1().RESTClient().GetRateLimiter()); err != nil {
+		if err := ratelimiter.RegisterMetricAndTrackRateLimiterUsage("deployment_controller", client.CoreV1().RESTClient().GetRateLimiter()); err != nil {
 			return nil, err
 		}
 	}
@@ -475,7 +475,7 @@ func (dc *DeploymentController) processNextWorkItem() bool {
 }
 
 func (dc *DeploymentController) handleErr(err error, key interface{}) {
-	if err == nil {
+	if err == nil || errors.HasStatusCause(err, v1.NamespaceTerminatingCause) {
 		dc.queue.Forget(key)
 		return
 	}

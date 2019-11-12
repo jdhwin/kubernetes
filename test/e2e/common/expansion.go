@@ -158,7 +158,7 @@ var _ = framework.KubeDescribe("Variable Expansion", func() {
 		    Description: Make sure a container's subpath can be set using an
 			expansion of environment variables.
 	*/
-	ginkgo.It("should allow substituting values in a volume subpath [sig-storage][NodeFeature:VolumeSubpathEnvExpansion]", func() {
+	ginkgo.It("should allow substituting values in a volume subpath [sig-storage]", func() {
 		podName := "var-expansion-" + string(uuid.NewUUID())
 		pod := &v1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -218,7 +218,7 @@ var _ = framework.KubeDescribe("Variable Expansion", func() {
 		    Description: Make sure a container's subpath can not be set using an
 			expansion of environment variables when backticks are supplied.
 	*/
-	ginkgo.It("should fail substituting values in a volume subpath with backticks [sig-storage][NodeFeature:VolumeSubpathEnvExpansion][Slow]", func() {
+	ginkgo.It("should fail substituting values in a volume subpath with backticks [sig-storage][Slow]", func() {
 
 		podName := "var-expansion-" + string(uuid.NewUUID())
 		pod := &v1.Pod{
@@ -267,7 +267,7 @@ var _ = framework.KubeDescribe("Variable Expansion", func() {
 		    Description: Make sure a container's subpath can not be set using an
 			expansion of environment variables when absolute path is supplied.
 	*/
-	ginkgo.It("should fail substituting values in a volume subpath with absolute path [sig-storage][NodeFeature:VolumeSubpathEnvExpansion][Slow]", func() {
+	ginkgo.It("should fail substituting values in a volume subpath with absolute path [sig-storage][Slow]", func() {
 
 		podName := "var-expansion-" + string(uuid.NewUUID())
 		pod := &v1.Pod{
@@ -315,7 +315,7 @@ var _ = framework.KubeDescribe("Variable Expansion", func() {
 	   Testname: var-expansion-subpath-ready-from-failed-state
 	   Description: Verify that a failing subpath expansion can be modified during the lifecycle of a container.
 	*/
-	ginkgo.It("should verify that a failing subpath expansion can be modified during the lifecycle of a container [sig-storage][NodeFeature:VolumeSubpathEnvExpansion][Slow]", func() {
+	ginkgo.It("should verify that a failing subpath expansion can be modified during the lifecycle of a container [sig-storage][Slow]", func() {
 
 		podName := "var-expansion-" + string(uuid.NewUUID())
 		containerName := "dapi-container"
@@ -377,8 +377,7 @@ var _ = framework.KubeDescribe("Variable Expansion", func() {
 		}
 
 		ginkgo.By("creating the pod with failed condition")
-		var podClient *framework.PodClient
-		podClient = f.PodClient()
+		var podClient *framework.PodClient = f.PodClient()
 		pod = podClient.Create(pod)
 
 		err := e2epod.WaitTimeoutForPodRunningInNamespace(f.ClientSet, pod.Name, pod.Namespace, framework.PodStartShortTimeout)
@@ -406,7 +405,7 @@ var _ = framework.KubeDescribe("Variable Expansion", func() {
 			3.	successful expansion of the subpathexpr isn't required for volume cleanup
 
 	*/
-	ginkgo.It("should succeed in writing subpaths in container [sig-storage][NodeFeature:VolumeSubpathEnvExpansion][Slow]", func() {
+	ginkgo.It("should succeed in writing subpaths in container [sig-storage][Slow]", func() {
 
 		podName := "var-expansion-" + string(uuid.NewUUID())
 		containerName := "dapi-container"
@@ -469,8 +468,7 @@ var _ = framework.KubeDescribe("Variable Expansion", func() {
 		}
 
 		ginkgo.By("creating the pod")
-		var podClient *framework.PodClient
-		podClient = f.PodClient()
+		var podClient *framework.PodClient = f.PodClient()
 		pod = podClient.Create(pod)
 
 		ginkgo.By("waiting for pod running")
@@ -515,7 +513,7 @@ var _ = framework.KubeDescribe("Variable Expansion", func() {
 
 	*/
 
-	ginkgo.It("should not change the subpath mount on a container restart if the environment variable changes [sig-storage][NodeFeature:VolumeSubpathEnvExpansion][Slow]", func() {
+	ginkgo.It("should not change the subpath mount on a container restart if the environment variable changes [sig-storage][Slow]", func() {
 
 		suffix := string(uuid.NewUUID())
 		podName := fmt.Sprintf("var-expansion-%s", suffix)
@@ -607,8 +605,7 @@ var _ = framework.KubeDescribe("Variable Expansion", func() {
 
 		// Start pod
 		ginkgo.By(fmt.Sprintf("Creating pod %s", pod.Name))
-		var podClient *framework.PodClient
-		podClient = f.PodClient()
+		var podClient *framework.PodClient = f.PodClient()
 		pod = podClient.Create(pod)
 		defer func() {
 			e2epod.DeletePodWithWait(f.ClientSet, pod)
@@ -640,9 +637,7 @@ var _ = framework.KubeDescribe("Variable Expansion", func() {
 })
 
 func testPodFailSubpath(f *framework.Framework, pod *v1.Pod) {
-
-	var podClient *framework.PodClient
-	podClient = f.PodClient()
+	var podClient *framework.PodClient = f.PodClient()
 	pod = podClient.Create(pod)
 
 	defer func() {
